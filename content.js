@@ -69,6 +69,35 @@
   injectSelectors("advanced-blocker-custom", config.customSelectors || []);
   injectSelectors("advanced-blocker-distractions", distractionSelectors());
 
+  // --- redirect / popunder capture -----------------------------------------
+  // popup-guard.js runs in the MAIN world and dispatches this event on window
+  // whenever it refuses a cross-site window.open(). Content scripts share the
+  // DOM event system, so we can observe it here and persist it via the service
+  // worker -- the user should not have to sit with DevTools open waiting for an
+  // intermittent hijack.
+  window.addEventListener("advanced-blocker-popup-blocked", event => {
+    const target = event?.detail?.url;
+    if (!target) return;
+    chrome.runtime.sendMessage({
+      type: "reportRedirectEvent",
+      kind: "popup-blocked",
+      from: location.href,
+      to: String(target).slice(0, 1500)
+    }).catch(() => {});
+  });
+
+  // Report cross-site link clicks so the service worker can tell an ordinary
+  // user-initiated navigation apart from an unexplained one. Only cross-site
+  // anchors are reported, which keeps this far quieter than every click.
+  document.addEventListener("click", event => {
+    const anchor = event.target?.closest?.("a[href]");
+    if (!anchor) return;
+    let targetHost = "";
+    try { targetHost = new URL(anchor.href, location.href).hostname; } catch { return; }
+    if (!targetHost || tools.domainMatches(targetHost, host) || tools.domainMatches(host, targetHost)) return;
+    chrome.runtime.sendMessage({ type: "reportAnchorClick", host: targetHost }).catch(() => {});
+  }, true);
+
   let activityTimer = null;
   function reportActivity(patch = {}) {
     Object.assign(counters, patch);

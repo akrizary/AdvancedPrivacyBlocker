@@ -3,6 +3,7 @@ import { DEFAULT_SETTINGS, domainMatches, getSettings, isTrustActive, normalizeD
 import { buildPrivacyRules, FILTER_RULE_ID_MAX, isPrivacyRuleId, SESSION_RULE_ID_START } from "./lib/privacy-rules.js";
 import { classifyDestination, classifyRequest, summarizeTrackers } from "./lib/tracker-intelligence.js";
 import { buildTrackerOverrideRules, getSiteTrackerOverrides, sanitizeTrackerOverrides } from "./lib/tracker-overrides.js";
+import { registrableApprox } from "./lib/domain-utils.js";
 
 const BUILTIN_LISTS = Object.freeze([
   { id: "easylist", name: "EasyList", url: "https://easylist.to/easylist/easylist.txt", feature: "ads", enabled: true },
@@ -81,6 +82,36 @@ let customFilterMutationQueue = Promise.resolve();
 let builtinStateMutationQueue = Promise.resolve();
 let cosmeticMutationQueue = Promise.resolve();
 const trackerWriteQueues = new Map();
+
+// --- redirect / popunder capture ---------------------------------------------
+// Click-hijacks are intermittent, so they are recorded persistently instead of
+// requiring the user to watch DevTools. Kept local; never uploaded.
+const MAX_REDIRECT_EVENTS = 300;
+const ANCHOR_CLICK_GRACE_MS = 2500;
+const recentAnchorClicks = new Map(); // tabId -> { host, at }
+const lastTabUrls = new Map();        // tabId -> last known top-level URL
+let redirectEventQueue = Promise.resolve();
+
+function logRedirectEvent(entry) {
+  redirectEventQueue = redirectEventQueue.catch(() => {}).then(async () => {
+    const { redirectEvents = [] } = await chrome.storage.local.get("redirectEvents");
+    const list = Array.isArray(redirectEvents) ? redirectEvents : [];
+    // Collapse repeats of the same destination on the same page into a count.
+    const existing = list.find(item => item.kind === entry.kind && item.to === entry.to && item.fromHost === entry.fromHost);
+    if (existing) {
+      existing.count = Number(existing.count || 1) + 1;
+      existing.at = entry.at;
+    } else {
+      list.unshift({ ...entry, count: 1 });
+    }
+    await chrome.storage.local.set({ redirectEvents: list.slice(0, MAX_REDIRECT_EVENTS) });
+  });
+  return redirectEventQueue;
+}
+
+function hostOf(url) {
+  try { return new URL(url).hostname.toLowerCase(); } catch { return ""; }
+}
 
 function featureEnabled(settings, feature) {
   return Boolean(settings[FEATURE_SETTING[feature]]);
@@ -973,6 +1004,40 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "loading" || changeInfo.url) {
     chrome.storage.session.remove([sessionKey(tabId), contentCounterKey(tabId)]).catch(() => {});
   }
+  if (!changeInfo.url) return;
+
+  // Flag top-level navigations that jumped to a different site without the user
+  // clicking a link there. This catches same-tab click-hijacks, which the MAIN
+  // world guard cannot stop because window.location is unforgeable. Labelled
+  // "unexplained" rather than malicious: a JS navigation, form post or
+  // target=_blank link can land here legitimately.
+  const previousUrl = lastTabUrls.get(tabId) || "";
+  lastTabUrls.set(tabId, changeInfo.url);
+  if (!previousUrl) return;
+
+  const fromHost = hostOf(previousUrl);
+  const toHost = hostOf(changeInfo.url);
+  if (!fromHost || !toHost) return;
+  if (registrableApprox(fromHost) === registrableApprox(toHost)) return;
+
+  const click = recentAnchorClicks.get(tabId);
+  const explained = click
+    && Date.now() - click.at < ANCHOR_CLICK_GRACE_MS
+    && registrableApprox(click.host) === registrableApprox(toHost);
+  if (explained) return;
+
+  logRedirectEvent({
+    kind: "unexplained-navigation",
+    at: Date.now(),
+    fromHost,
+    from: previousUrl.slice(0, 1500),
+    to: changeInfo.url.slice(0, 1500),
+    toHost
+  });
+});
+chrome.tabs.onRemoved.addListener(tabId => {
+  recentAnchorClicks.delete(tabId);
+  lastTabUrls.delete(tabId);
 });
 
 try {
@@ -1156,7 +1221,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             "customLists", "trustEntries", "globalPauseUntil", "perListStats", "flaggedExceptions",
             "ruleCount", "totalParsed", "enabledStaticRules", "enabledStaticRulesets", "lastUpdate",
             "lastUpdateError", "globalStats", "privacyHeaderStatus", "customCosmetic",
-            "customFilterText", "trackerOverrides", "imageAllowances"
+            "customFilterText", "trackerOverrides", "imageAllowances", "redirectEvents"
           ])
         ]);
         sendResponse({ settings, builtinStates: states, builtinLists: BUILTIN_LISTS, ...stored });
@@ -1170,6 +1235,48 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case "removeCustomCosmetic": {
         await mutateCustomCosmetic(message.host, message.selector, true);
         sendResponse({ ok: true });
+        return;
+      }
+      case "reportAnchorClick": {
+        const tabId = sender?.tab?.id;
+        const host = normalizeDomain(message.host);
+        if (Number.isInteger(tabId) && host) recentAnchorClicks.set(tabId, { host, at: Date.now() });
+        sendResponse({ ok: true });
+        return;
+      }
+      case "reportRedirectEvent": {
+        const fromHost = hostOf(message.from || "");
+        await logRedirectEvent({
+          kind: message.kind === "popup-blocked" ? "popup-blocked" : "unexplained-navigation",
+          at: Date.now(),
+          fromHost,
+          from: String(message.from || "").slice(0, 1500),
+          to: String(message.to || "").slice(0, 1500),
+          toHost: hostOf(message.to || "")
+        });
+        sendResponse({ ok: true });
+        return;
+      }
+      case "clearRedirectEvents": {
+        await chrome.storage.local.set({ redirectEvents: [] });
+        sendResponse({ ok: true });
+        return;
+      }
+      case "blockRedirectDomain": {
+        // Append a filter for the offending host to the user's custom filters,
+        // reusing the existing custom-filter pipeline so it becomes a real rule.
+        const domain = normalizeDomain(message.domain);
+        if (!domain) throw new Error("Invalid domain");
+        const { customFilterText = "" } = await chrome.storage.local.get("customFilterText");
+        const rule = `||${domain}^`;
+        const existing = String(customFilterText || "");
+        if (existing.split("\n").some(line => line.trim() === rule)) {
+          sendResponse({ ok: true, alreadyPresent: true, rule });
+          return;
+        }
+        const next = existing.trim() ? `${existing.replace(/\s*$/, "")}\n${rule}\n` : `${rule}\n`;
+        const result = await setCustomFilterTextState(next);
+        sendResponse({ ok: result?.ok !== false, rule, ...result });
         return;
       }
       case "clearStats": {

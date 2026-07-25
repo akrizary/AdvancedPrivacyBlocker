@@ -61,7 +61,7 @@ async function refreshState() {
 // Live-refresh if settings change elsewhere (popup, another options tab, sync).
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
-  if (changes.settings || changes.trustEntries || changes.imageAllowances ||
+  if (changes.settings || changes.trustEntries || changes.imageAllowances || changes.redirectEvents ||
       changes.customLists || changes.builtinStates || changes.trackerOverrides) {
     refreshState();
   }
@@ -150,6 +150,33 @@ function renderImageAllowances() {
   }));
 }
 
+function renderRedirectEvents() {
+  const events = Array.isArray(state.redirectEvents) ? state.redirectEvents : [];
+  $("redirectCount").textContent = events.length;
+  $("redirectEvents").innerHTML = events.length ? events.slice(0, 100).map(item => {
+    const blocked = item.kind === "popup-blocked";
+    const label = blocked ? "Popunder blocked" : "Unexplained navigation";
+    const repeats = Number(item.count || 1) > 1 ? ` &middot; ${Number(item.count)}×` : "";
+    const when = item.at ? new Date(item.at).toLocaleString() : "";
+    return `<div class="list-item"><span class="list-main">
+      <b>${escapeHtml(item.toHost || "unknown")}</b>
+      <small class="${blocked ? "ok" : "fail"}">${label}${repeats} &middot; from ${escapeHtml(item.fromHost || "?")} &middot; ${escapeHtml(when)}</small>
+      <small title="${escapeHtml(item.to || "")}">${escapeHtml(String(item.to || "").slice(0, 120))}</small>
+      </span><button data-block-domain="${escapeHtml(item.toHost || "")}">Block domain</button></div>`;
+  }).join("") : '<p class="empty ok">Nothing recorded. Blocked popunders and unexplained redirects will appear here automatically.</p>';
+
+  document.querySelectorAll("[data-block-domain]").forEach(button => button.addEventListener("click", async () => {
+    const domain = button.dataset.blockDomain;
+    if (!domain) { say("No domain to block"); return; }
+    button.disabled = true;
+    const response = await chrome.runtime.sendMessage({ type: "blockRedirectDomain", domain });
+    say(response?.ok
+      ? (response.alreadyPresent ? `${domain} already blocked` : `Blocking ${domain}`)
+      : (response?.error || "Could not add the rule"));
+    await refreshState();
+  }));
+}
+
 function renderTrust() {
   const now = Date.now();
   const entries = Object.entries(state.trustEntries || {}).filter(([, entry]) => entry?.until === 0 || Number(entry?.until) > now);
@@ -230,6 +257,7 @@ function render() {
   renderCustomFilterText();
   renderTrust();
   renderImageAllowances();
+  renderRedirectEvents();
   renderTrackerOverrides();
   renderZaps();
   renderDiagnostics();
@@ -274,6 +302,11 @@ $("pauseGlobal").addEventListener("click", async () => {
 });
 $("resumeGlobal").addEventListener("click", async () => {
   await chrome.runtime.sendMessage({ type: "pauseGlobal", durationMs: 0 });
+  await refreshState();
+});
+$("clearRedirects").addEventListener("click", async () => {
+  await chrome.runtime.sendMessage({ type: "clearRedirectEvents" });
+  say("Redirect log cleared");
   await refreshState();
 });
 $("clearStats").addEventListener("click", async () => {
