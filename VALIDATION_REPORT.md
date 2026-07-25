@@ -12,13 +12,15 @@ Generated: 2026-07-24
 
 ## Rule inventory
 
-- Manifest rulesets: **33**
+- Manifest rulesets: **52** (47 generated + 4 seeds + 1 empty `backup`)
 - Enabled-by-default seed rulesets: **4**
-- Packaged static DNR rules: **269,859**
-- Block actions: **264,720**
-- Allow actions: **5,138**
+- Packaged static DNR rules: **455,372**
+- Block actions: **449,216**
+- Allow actions: **6,155**
 - Modify-header actions: **1**
 - Unscoped blanket block rules: **0**
+
+Reproduce these counts with `npm run validate` (`test/validate-rules.mjs`).
 
 ### Generated feature inventory
 
@@ -70,20 +72,18 @@ Generated: 2026-07-24
    - Every packaged DNR resource parses.
    - Allowed action and condition schema keys only.
    - Metadata counts match actual files.
-   - Source SHA-256 values are present.
+   - Metadata and manifest declare the same generated ruleset ids.
+   - Security rules carry the `2,000,000` priority invariant.
    - Popup/options asset references resolve.
    - No obvious private key or `.env` artifact is packaged.
 
 ## Source-list provenance
 
-| Feature | Bytes | SHA-256 |
-|---|---:|---|
-| EasyList advertisements | 2,178,513 | `fc5d098f03e79e8c156792a6d1cdd2211f63fdeb61e1dc15a269cb362ef82303` |
-| AdGuard Tracking Protection | 6,383,426 | `13591713026e95b13b13e617aa1f22510fa9bacee5d29f727cb28ddf9a580828` |
-| AdGuard Annoyances | 4,232,607 | `9412d4b46bd7dc62f9393a75ef7cec2525dc7effa06b9e3bb99f00ba3d3ae998` |
-| URLHaus Online malware | 864,866 | `546755baa4d7a0c4834b53cd2d95fd041d32bb5548b8d2c4b00e295992a8cb3a` |
-
-The byte values above are checked against generated metadata during final packaging; if they differ, this report must be regenerated.
+Source lists are fetched over HTTPS at build time and are not vendored, so this
+build records **no source byte counts or SHA-256 hashes**. See
+`BUILD_PROVENANCE.md` for what `ruleset-metadata.json` does record and for the
+resulting reproducibility limits, and `THIRD_PARTY_NOTICES.md` for the full list
+of the 14 upstream sources and their licences.
 
 ## Remaining release gates
 

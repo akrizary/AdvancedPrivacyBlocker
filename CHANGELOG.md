@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased — security coverage, loosening controls and build rewrite
+
+### Added
+
+- Page-side **scriptlets** (MAIN world, toggleable) that neutralize anti-adblock
+  bait properties and right-click/selection blockers, each individually fail-safe.
+- **Loosening controls** for sites broken by strict filtering: global
+  image/media/font resource-type allowances, plus a per-site "allow images on this
+  site only" rule that permits images initiated by that site including its
+  third-party image CDN.
+- Five security subscriptions — botnet C2, PUP/adware, spam TLDs, Dandelion
+  Anti-Malware and phishing/malvertising — plus an opt-in HaGeZi threat-
+  intelligence feed. Packaged security rules grew to ~120,000.
+- Regional coverage via ABPindo (Indonesian/Malay) and AdGuard Mobile Ads.
+- Tracker catalog expanded to roughly 190 company profiles.
+- `test/run-tests.mjs`: converter tests plus a service-worker smoke test that
+  loads `background.js` against a mocked `chrome.*` and exercises every message
+  handler.
+- `test/validate-rules.mjs` (`npm run validate`): re-checks all packaged rules
+  against Chromium DNR constraints.
+- GitHub Actions CI, `LICENSE` (GPL-3.0-or-later) and `.gitignore`/`.gitattributes`.
+
+### Fixed
+
+- `getBuiltinStates()` called `.includes()` on a `Set`, throwing whenever a
+  built-in list had no stored state. Adding new built-in lists triggered it, which
+  broke `getOptionsState` — leaving the settings page blank — and also broke
+  filter-list refreshes through `getActiveLists()`.
+- Settings could appear to revert after closing the page: `setFeature` awaited
+  heavy sync work (including remote list downloads) before responding, so a tab
+  close could tear down the service worker mid-handler. The durable write now
+  completes and responds first, with sync work detached and re-triggered by
+  `storage.onChanged`.
+- Per-site image allowance was scoped `firstParty`, so it never matched the
+  third-party image CDNs comic readers actually use.
+- Dynamic (subscription) malware rules were boosted to priority 50,000, below
+  per-site trust (900,000) and the resource-type allowances (950,000), so
+  trusting a site could override a known-malicious host while packaged static
+  rules at 2,000,000 still blocked it. Dynamic now matches static.
+- Filter converter: rejected DNR-invalid `urlFilter` patterns (`||*` prefixes,
+  mid-pattern `|`), skipped RE2-incompatible regexes in the static build, and
+  dropped non-canonical `$domain=` values such as TLD wildcards.
+
+### Changed
+
+- `build-rules.mjs` rewritten to emit feature-grouped rulesets, per-feature
+  cosmetic files and `ruleset-metadata.json` matching what the service worker
+  loads. The previous script produced a layout the extension could not consume.
+- Source-list byte counts and SHA-256 hashes are **no longer recorded**; lists are
+  fetched at build time rather than read from pinned local files. This supersedes
+  the 2.1.0 entry below. See `BUILD_PROVENANCE.md`.
+- UI: real toggle switches, hover/focus states, wrapped setting descriptions and
+  a right-aligned per-site control.
+
 ## 2.1.0 — Tracker controls, resilience and priority hardening
 
 - Added individual per-site tracker Default / Block / Allow controls in the popup and settings page.

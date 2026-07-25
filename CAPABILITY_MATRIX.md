@@ -36,7 +36,8 @@ This extension implements independent functional equivalents. It does not contai
 | Configuration portability | Import/export settings, lists, trust, overrides and zaps | Implemented | Imported structures are size/type constrained |
 | Static quota adaptation | Runtime allocation using available static-rule count | Implemented | Browser/global extension quota controls final activation |
 | Concurrency protection | Serialized settings and protection-state writes | Implemented | External storage edits remain outside transactional control |
-| Build provenance | Byte count and SHA-256 for each source list | Implemented | Hash proves input identity, not upstream authenticity by itself |
+| Build provenance | Per-ruleset source, feature, index, rule count and exception ids in `ruleset-metadata.json` | Implemented | Lists are fetched at build time; no byte counts or SHA-256 hashes are recorded, so builds are not bit-reproducible over time |
+| Ruleset integrity checking | `npm run validate` re-checks all packaged rules against Chromium DNR constraints | Implemented | Encodes documented constraints; not a substitute for a real browser load |
 | CNAME-cloaking unmasking | None on Chromium | Not implemented | Ordinary Chromium extension APIs do not expose required DNS resolution |
 | Ghostery heuristic anonymization | Deterministic sanitization only | Not reproduced | Proprietary implementation unavailable |
 | Full Ghostery TrackerDB | Smaller local catalog/public lists | Not reproduced | Dataset and license differ |

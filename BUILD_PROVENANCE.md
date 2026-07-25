@@ -1,26 +1,47 @@
-# Build Provenance — 2.1.0
+# Build provenance
 
-The final rules were generated on **2026-07-24** from local, pinned source-list files. The source files themselves are not bundled in the release; their exact byte counts and SHA-256 hashes are recorded below and in `rules/generated/ruleset-metadata.json`.
+`npm run build` (`build-rules.mjs`) fetches each source list over HTTPS at build
+time and converts it to `declarativeNetRequest` rules. Source lists are **not**
+vendored in this repository, so a build reflects upstream state at the moment it
+ran. Re-running the build after upstream changes will produce different output.
 
-| Feature | Upstream list | Build input | Bytes | SHA-256 |
-|---|---|---|---:|---|
-| Ads | EasyList | `/mnt/data/easylist.txt` | 2,178,513 | `fc5d098f03e79e8c156792a6d1cdd2211f63fdeb61e1dc15a269cb362ef82303` |
-| Tracking | AdGuard Tracking Protection | `/mnt/data/adguard_tracking.txt` | 6,383,426 | `13591713026e95b13b13e617aa1f22510fa9bacee5d29f727cb28ddf9a580828` |
-| Annoyances | AdGuard Annoyances | `/mnt/data/adguard_annoyances.txt` | 4,232,607 | `9412d4b46bd7dc62f9393a75ef7cec2525dc7effa06b9e3bb99f00ba3d3ae998` |
-| Known malware | URLHaus Online | `/mnt/data/urlhaus-filter-ag-online.txt` | 864,866 | `546755baa4d7a0c4834b53cd2d95fd041d32bb5548b8d2c4b00e295992a8cb3a` |
+`rules/generated/ruleset-metadata.json` records, for every generated ruleset:
 
-## Rebuild command
+| Field | Meaning |
+| --- | --- |
+| `id` | Ruleset id — also its manifest entry and filename |
+| `feature` | `ads`, `tracking`, `annoyances` or `malware` |
+| `source` | Which upstream list(s) contributed the rules in this file |
+| `sourceLocation` | `remote-build` — lists were fetched, not read from disk |
+| `index` | Position within its feature group, used for activation ordering |
+| `count` | Number of rules in the file |
+| `allowIds` | Ids of exception (`allow`) rules in the file |
 
-```bash
-ADS_LIST_FILE=/mnt/data/easylist.txt \
-TRACKING_LIST_FILE=/mnt/data/adguard_tracking.txt \
-ANNOYANCES_LIST_FILE=/mnt/data/adguard_annoyances.txt \
-MALWARE_LIST_FILE=/mnt/data/urlhaus-filter-ag-online.txt \
-npm run build
-```
+## Output of the current committed build
+
+| Feature | Static rules | Ruleset files | Cosmetic selectors |
+| --- | --- | --- | --- |
+| ads | 65,529 | 7 | 31,897 |
+| tracking | 249,586 | 25 | 255 |
+| annoyances | 20,205 | 3 | 33,631 |
+| malware | 119,944 | 12 | 461 |
+| **total** | **455,264** | **47** | **66,244** |
+
+Plus five hand-maintained manifest entries: `core_ads` (58 rules),
+`core_trackers` (25), `core_annoyances` (0), `core_malware` (25) and the empty
+`backup` placeholder — **52 declared rulesets**, within Chromium's limit of 100.
+
+All generated rulesets ship `enabled: false`. The service worker enables them at
+runtime, malware first, up to the quota reported by
+`declarativeNetRequest.getAvailableStaticRuleCount()`.
 
 ## Provenance limitations
 
-- A matching hash proves that the same bytes were used; it does not independently prove upstream authenticity.
-- Public distribution requires a current review of each upstream project's license and attribution requirements.
-- Rebuilding later from live URLs can produce different rules because these lists change continuously.
+- The build records **no source byte counts or SHA-256 hashes**. Builds are
+  reproducible in method but not bit-identical over time, because the upstream
+  lists change continuously. To pin inputs, vendor the source lists and point the
+  build at local copies.
+- Recording a hash would prove the same bytes were used; it would not
+  independently prove upstream authenticity.
+- Public redistribution requires a current review of each upstream project's
+  license and attribution requirements — see `THIRD_PARTY_NOTICES.md`.
