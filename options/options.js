@@ -10,6 +10,7 @@ const SETTING_DEFS = [
   ["serpProtection", "Search intelligence", "Flag recognized tracker destinations in search results"],
   ["privacySignals", "GPC and DNT", "Send browser privacy preference signals"],
   ["scriptlets", "Scriptlets", "Run page-side neutralizers (anti-adblock bait, right-click blockers)"],
+  ["popupGuard", "Popup guard", "Block click-hijack tabs and popunder redirects; allows sign-in and payment popups"],
   ["stripTrackingParams", "Tracking-parameter removal", "Remove common advertising click identifiers"],
   ["socialWidgets", "Social widgets", "Hide embedded share and follow widgets"],
   ["signInPrompts", "Sign-in prompts", "Hide common third-party sign-in prompts"],

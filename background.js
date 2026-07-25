@@ -72,6 +72,7 @@ let staticSyncQueue = Promise.resolve();
 let privacySyncQueue = Promise.resolve();
 let privacyScriptSyncQueue = Promise.resolve();
 let scriptletSyncQueue = Promise.resolve();
+let popupGuardSyncQueue = Promise.resolve();
 let trustSyncQueue = Promise.resolve();
 let statsWriteQueue = Promise.resolve();
 let trustMutationQueue = Promise.resolve();
@@ -527,6 +528,33 @@ async function syncScriptletsCore() {
   }
 }
 
+async function syncPopupGuard() {
+  popupGuardSyncQueue = popupGuardSyncQueue.catch(() => {}).then(syncPopupGuardCore);
+  return popupGuardSyncQueue;
+}
+
+async function syncPopupGuardCore() {
+  const settings = await getSettings();
+  const id = "advanced-blocker-popup-guard";
+  try {
+    const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [id] });
+    if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: [id] });
+    if (settings.popupGuard) {
+      await chrome.scripting.registerContentScripts([{
+        id,
+        matches: ["http://*/*", "https://*/*"],
+        js: ["popup-guard.js"],
+        allFrames: true,
+        runAt: "document_start",
+        world: "MAIN",
+        persistAcrossSessions: true
+      }]);
+    }
+  } catch (error) {
+    console.warn("Could not register MAIN-world popup guard", error);
+  }
+}
+
 async function scheduleRefresh() {
   const settings = await getSettings();
   const period = Math.max(30, Number(settings.refreshMinutes) || DEFAULT_SETTINGS.refreshMinutes);
@@ -913,6 +941,7 @@ async function syncAll({ updateLists = false } = {}) {
     syncPrivacyRules(),
     syncPrivacyContentScript(),
     syncScriptlets(),
+    syncPopupGuard(),
     applyTrustRules(),
     scheduleRefresh()
   ]);
@@ -966,7 +995,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (changes.settings) {
     cosmeticHostCache.clear();
-    Promise.allSettled([syncStaticRulesets(), syncPrivacyRules(), syncPrivacyContentScript(), syncScriptlets(), applyTrustRules(), scheduleRefresh()]);
+    Promise.allSettled([syncStaticRulesets(), syncPrivacyRules(), syncPrivacyContentScript(), syncScriptlets(), syncPopupGuard(), applyTrustRules(), scheduleRefresh()]);
   }
   if (changes.trustEntries || changes.globalPauseUntil || changes.imageAllowances) applyTrustRules();
   if (changes.trackerOverrides) syncPrivacyRules();
@@ -1061,7 +1090,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // tab close in that window could tear it down mid-handler. Jobs are
         // idempotent and also re-triggered by the storage.onChanged listener.
         sendResponse({ ok: true, settings });
-        const jobs = [syncStaticRulesets(), syncPrivacyRules(), syncPrivacyContentScript(), syncScriptlets(), applyTrustRules()];
+        const jobs = [syncStaticRulesets(), syncPrivacyRules(), syncPrivacyContentScript(), syncScriptlets(), syncPopupGuard(), applyTrustRules()];
         if (["adBlocking", "antiTracking", "annoyances", "malwareProtection"].includes(message.key)) jobs.push(refreshFilters());
         Promise.allSettled(jobs).catch(() => {});
         return;
@@ -1073,7 +1102,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         const settings = await setSettings(patch);
         sendResponse({ ok: true, settings });
-        const jobs = [syncStaticRulesets(), syncPrivacyRules(), syncPrivacyContentScript(), syncScriptlets(), applyTrustRules(), scheduleRefresh()];
+        const jobs = [syncStaticRulesets(), syncPrivacyRules(), syncPrivacyContentScript(), syncScriptlets(), syncPopupGuard(), applyTrustRules(), scheduleRefresh()];
         if (["adBlocking", "antiTracking", "annoyances", "malwareProtection"].some(key => Object.prototype.hasOwnProperty.call(patch, key))) jobs.push(refreshFilters());
         Promise.allSettled(jobs).catch(() => {});
         return;
