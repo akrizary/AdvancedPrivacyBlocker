@@ -12,7 +12,7 @@ const store = {};
 
 globalThis.chrome = {
   runtime: {
-    getManifest: () => ({ version: "2.1.0", declarative_net_request: { rule_resources: [] } }),
+    getManifest: () => ({ version: "2.2.0", declarative_net_request: { rule_resources: [] } }),
     getURL: p => "file://" + p,
     onInstalled: noopEvent(), onStartup: noopEvent(),
     onMessage: { addListener: fn => { listeners.message = fn; } }
@@ -53,6 +53,18 @@ globalThis.chrome = {
   contextMenus: { create: () => {}, removeAll: cb => cb && cb(), onClicked: noopEvent() }
 };
 
+// Keep the suite hermetic: some handlers (e.g. blockRedirectDomain) queue a
+// filter refresh, which would otherwise download real lists in CI.
+// Shapes must match what the code expects: ruleset-metadata.json is an object
+// with a `rulesets` array, while cosmetic-*.json files are plain arrays.
+globalThis.fetch = async (url = "") => ({
+  ok: true,
+  status: 200,
+  headers: { get: () => "0" },
+  text: async () => "! mocked empty filter list\n",
+  json: async () => (String(url).includes("ruleset-metadata") ? { rulesets: [] } : [])
+});
+
 let failed = 0;
 
 // --- 1. converter unit tests -------------------------------------------------
@@ -79,6 +91,10 @@ if (typeof listeners.message !== "function") {
     ["setTrackerOverride", { type: "setTrackerOverride", siteDomain: "a.com", trackerDomain: "b.com", status: "allow" }],
     ["classifyDestinations", { type: "classifyDestinations", urls: ["https://doubleclick.net/x"] }],
     ["addCustomCosmetic", { type: "addCustomCosmetic", host: "a.com", selector: ".ad" }],
+    ["reportAnchorClick", { type: "reportAnchorClick", host: "mangahost.example" }],
+    ["reportRedirectEvent", { type: "reportRedirectEvent", kind: "popup-blocked", from: "https://comic.example/x", to: "https://flax.to/y" }],
+    ["blockRedirectDomain", { type: "blockRedirectDomain", domain: "flax.to" }],
+    ["clearRedirectEvents", { type: "clearRedirectEvents" }],
     ["syncStatic", { type: "syncStatic" }],
     ["clearStats", { type: "clearStats" }],
     ["exportStatic", { type: "exportStatic" }]

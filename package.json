@@ -1,10 +1,12 @@
 {
   "name": "advanced-privacy-blocker",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Chromium Manifest V3 privacy extension: ad/tracker blocking, tracker intelligence, consent automation and security filtering.",
   "type": "module",
   "private": true,
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "license": "GPL-3.0-or-later",
   "scripts": {
     "build": "node build-rules.mjs",

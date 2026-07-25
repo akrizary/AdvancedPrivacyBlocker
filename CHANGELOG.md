@@ -1,9 +1,21 @@
 # Changelog
 
-## Unreleased — security coverage, loosening controls and build rewrite
+## 2.2.0 — Popunder protection, security coverage, loosening controls and build rewrite
 
 ### Added
 
+- **Popup guard** (`popup-guard.js`, MAIN world): wraps `window.open` so a site's
+  document-wide click listener cannot open an unrelated ad tab when you click a
+  button. Same-site targets, targets matching a link the user just clicked, known
+  sign-in/payment providers and `about:blank` print flows remain allowed; other
+  cross-site opens receive a window-like stub. Default on, with one switch to
+  disable if a legitimate popup is ever refused.
+- **Automatic redirect logging**: blocked popunders and unexplained cross-site
+  navigations are recorded to a local, capped, deduplicated log with repeat
+  counts, reviewable under *Redirect & popup activity* with a one-click
+  **Block domain** action. Intermittent hijacks no longer need to be reproduced
+  with DevTools open. Same-tab hijacks are recorded but cannot be intercepted,
+  because `window.location` is unforgeable.
 - Page-side **scriptlets** (MAIN world, toggleable) that neutralize anti-adblock
   bait properties and right-click/selection blockers, each individually fail-safe.
 - **Loosening controls** for sites broken by strict filtering: global

@@ -1,4 +1,4 @@
-# Advanced Privacy Blocker 2.1.0
+# Advanced Privacy Blocker 2.2.0
 
 [![CI](https://github.com/akrizary/AdvancedPrivacyBlocker/actions/workflows/ci.yml/badge.svg)](https://github.com/akrizary/AdvancedPrivacyBlocker/actions/workflows/ci.yml)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSE)
@@ -48,6 +48,23 @@ The package implements the Ghostery-style capabilities that can be independently
 - Optional YouTube Shorts and social Reels suppression.
 - Interactive **Zap an element** mode with persistent site-scoped selectors.
 - Page-side **scriptlets** (MAIN world) that neutralize anti-adblock bait properties and right-click/selection blockers, toggleable and fail-safe per scriptlet.
+
+### 4a. Popunder and click-hijack protection
+
+- **Popup guard** (`popup-guard.js`, MAIN world): wraps `window.open` so that a
+  site's document-wide click listener cannot open an unrelated ad tab when you
+  click a button. Same-site targets, targets matching a link you just clicked,
+  known sign-in/payment providers (including regional Malaysian gateways) and
+  `about:blank` print/preview flows are all still allowed; other cross-site opens
+  are refused and receive a window-like stub so page code does not throw.
+- **Automatic redirect logging**: blocked popunders and unexplained cross-site
+  navigations are recorded to a local, capped, deduplicated log with repeat
+  counts, reviewable under *Redirect & popup activity* in the options page. Each
+  entry has a one-click **Block domain** action that appends a rule to your
+  custom filters. Intermittent hijacks therefore do not need to be reproduced
+  with DevTools open.
+- Same-tab hijacks are recorded but cannot be intercepted: `window.location` is
+  unforgeable, so blocking one requires adding its domain to a filter.
 
 ### 4b. Loosening controls (for sites broken by strict filtering)
 
