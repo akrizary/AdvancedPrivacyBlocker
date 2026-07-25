@@ -1,5 +1,8 @@
 # Advanced Privacy Blocker 2.1.0
 
+[![CI](https://github.com/akrizary/AdvancedPrivacyBlocker/actions/workflows/ci.yml/badge.svg)](https://github.com/akrizary/AdvancedPrivacyBlocker/actions/workflows/ci.yml)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSE)
+
 A Chromium Manifest V3 privacy extension upgraded from the supplied conventional blocker into an independent, layered **Ghostery-class** privacy tool. It is **not affiliated with, endorsed by, or a copy of Ghostery**.
 
 The package implements the Ghostery-style capabilities that can be independently reproduced with public filter data and Chromium extension APIs. Proprietary Ghostery services, private datasets, community telemetry and Gecko-only DNS capabilities are not represented as completed features.
@@ -65,16 +68,28 @@ The package implements the Ghostery-style capabilities that can be independently
 
 ## Protection-order model
 
-The DNR priority model is intentionally layered:
+The DNR priority model is intentionally layered so that loosening one control
+cannot silently disable another:
 
-1. Explicit global/site trust: highest priority and user-controlled.
-2. Known malware blocks: priority `50,000`.
-3. Privacy parameter sanitization: priority `3,000`.
-4. GPC/DNT request headers: priority `2,500`.
-5. Individual tracker allow/block decisions: priority `1,000`.
-6. Ordinary packaged and subscription filtering rules.
+| Priority | Layer |
+| --- | --- |
+| `2,000,000` | Security blocks (malware, phishing, malvertising, botnet C2, PUP/adware, spam TLDs) |
+| `1,000,000` | Global timed pause (`allowAllRequests`) |
+| `950,000` | Global resource-type allowances (images / media / fonts) |
+| `900,000` | Per-site trust (`allowAllRequests`) |
+| `40,000` | Per-site image allowance |
+| `3,000` | Privacy parameter sanitization |
+| `2,500` | GPC/DNT request headers |
+| `1,000` | Individual tracker allow/block decisions |
+| `1` – `2` | Ordinary packaged and subscription rules (block / exception) |
 
-This prevents an individual tracker exception from silently disabling known-malware protection.
+Two consequences worth stating explicitly:
+
+- An individual tracker exception cannot disable known-malware protection.
+- Security blocks deliberately sit **above** trust, global pause and every
+  loosening allowance. Trusting a site or enabling "allow images" therefore does
+  not unblock a known-malicious host. Disabling the **Malware protection**
+  feature switch is the only way to stand those rules down.
 
 ## Boundaries that are not falsely claimed
 
@@ -149,7 +164,17 @@ The package has no account system, ad SDK or custom telemetry endpoint. Network 
 ## Validation status
 
 - `FULL_TEXT_COVERAGE_VERIFIED`: all package source and generated rule files were inspected or exhaustively parsed.
-- `STATIC_VALIDATION_VERIFIED`: JavaScript syntax, JSON, manifest references, ruleset quotas, source hashes, DNR structure, priority invariants and regression tests passed.
+- `STATIC_VALIDATION_VERIFIED`: JavaScript syntax, JSON, manifest references, ruleset quotas, DNR structure, priority invariants and regression tests passed. `npm test` reproduces this: converter unit tests, a service-worker smoke test over every message handler, and `test/validate-rules.mjs`, which re-checks all packaged rules against Chromium's DNR constraints (ASCII/anchor rules for `urlFilter`, RE2-incompatible `regexFilter`, domain canonicalisation, resource-type enums, per-ruleset id uniqueness and the security-priority invariant).
 - `MOCK_RUNTIME_VALIDATION_VERIFIED`: service-worker orchestration passed against a mocked Chrome runtime, including concurrency and outage scenarios.
 - `BROWSER_RUNTIME_BLOCKED_BY_ENVIRONMENT_POLICY`: the available Chromium environment enforces `ExtensionInstallBlocklist: ["*"]`.
 - `BROWSER_RUNTIME_UNVERIFIED`: representative websites still require testing in an unmanaged Chromium 121+ profile before public release.
+
+## License
+
+Licensed under **GPL-3.0-or-later** — see [LICENSE](LICENSE).
+
+GPL was chosen for license compatibility rather than preference: the packaged
+rules under `rules/generated/` are derived from EasyList and the AdGuard filter
+lists, which are distributed under GPL-3.0. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the full source list and
+attribution terms.

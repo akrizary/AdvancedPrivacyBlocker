@@ -53,7 +53,12 @@ const MAX_CUSTOM_LISTS = 50;
 const MAX_REMOTE_LIST_BYTES = 25 * 1024 * 1024;
 const MAX_INLINE_FILTER_BYTES = 1 * 1024 * 1024;
 const MAX_INLINE_NETWORK_RULES = 5_000;
-const MALWARE_BLOCK_PRIORITY = 50_000;
+// Security blocks must outrank session allowances (global pause 1,000,000,
+// resource-type allowances 950,000, per-site trust 900,000) so that trusting a
+// site or enabling "allow images" cannot unblock a known-malicious host. This
+// matches MALWARE_BLOCK_PRIORITY in build-rules.mjs, which stamps the packaged
+// static security rules -- the two must stay in sync.
+const MALWARE_BLOCK_PRIORITY = 2_000_000;
 const REMOTE_FETCH_TIMEOUT_MS = 30_000;
 const VALID_LIST_FEATURES = new Set(["ads", "tracking", "annoyances", "malware", "custom"]);
 

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Tests and ruleset integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The project has no runtime dependencies, so there is nothing to install.
+      # `npm ci` would fail without a lockfile -- skip it deliberately.
+      - name: Converter tests and service-worker smoke test
+        run: node test/run-tests.mjs
+
+      - name: Ruleset integrity (Chromium DNR constraints)
+        run: node test/validate-rules.mjs
+
+      - name: Verify committed rulesets match the manifest
+        run: |
+          node -e "
+          const fs=require('fs');
+          const m=JSON.parse(fs.readFileSync('manifest.json','utf8'));
+          const res=m.declarative_net_request.rule_resources;
+          const missing=res.filter(r=>!fs.existsSync(r.path));
+          if(missing.length){
+            console.error('Missing ruleset files:', missing.map(r=>r.path).join(', '));
+            process.exit(1);
+          }
+          console.log(res.length+' rulesets declared, all files present.');
+          "

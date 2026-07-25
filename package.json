@@ -5,8 +5,10 @@
   "type": "module",
   "private": true,
   "engines": { "node": ">=18" },
+  "license": "GPL-3.0-or-later",
   "scripts": {
     "build": "node build-rules.mjs",
-    "test": "node test/run-tests.mjs"
+    "validate": "node test/validate-rules.mjs",
+    "test": "node test/run-tests.mjs && node test/validate-rules.mjs"
   }
 }
