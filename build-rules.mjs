@@ -42,6 +42,27 @@ const KNOWN_OPTS = new Set(["third-party","domain","script","image","stylesheet"
   "match-case","important","popup","genericblock","generichide","elemhide","csp","redirect",
   "redirect-rule","removeparam","all"]);
 
+// Security feeds record full malware C2 and phishing URLs, which sometimes embed
+// the operator's own credentials (e.g. api.telegram.org/bot<token>/... used for
+// data exfiltration, or one-time JWT phishing links). Committing those trips
+// secret scanners and republishes third-party credentials, while blocking them in
+// a browser buys essentially nothing: desktop malware does not exfiltrate through
+// the browser, and a single-use phishing JWT will never match again. Drop them.
+const CREDENTIAL_PATTERNS = [
+  /\/bot\d{6,12}:[A-Za-z0-9_-]{30,}/,          // Telegram bot token
+  /\b(AKIA|ASIA)[0-9A-Z]{16}\b/,               // AWS access key id
+  /\bAIza[0-9A-Za-z_-]{35}\b/,                 // Google API key
+  /\bxox[abprs]-[0-9A-Za-z-]{10,}/,            // Slack token
+  /\b(ghp|gho|ghs|ghu)_[A-Za-z0-9]{36}\b/,     // GitHub token
+  /\b(sk|rk)_(live|test)_[A-Za-z0-9]{20,}/,    // Stripe key
+  /\bSG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/, // SendGrid key
+  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/ // JWT
+];
+
+function containsCredential(value) {
+  return CREDENTIAL_PATTERNS.some(pattern => pattern.test(value));
+}
+
 // Returns a DNR-valid urlFilter, or null if the pattern can't be expressed as one.
 function sanitizeUrlFilter(u) {
   if (!u) return null;
@@ -120,6 +141,7 @@ function parseList(text) {
 
     if (isRegex) continue; // RE2 can't be validated offline; runtime dynamic engine handles regex
     if (pattern.startsWith("/") && pattern.endsWith("/")) continue;
+    if (containsCredential(pattern)) continue; // never package third-party secrets
     const uf = sanitizeUrlFilter(pattern);
     if (!uf) continue;
     condition.urlFilter = uf;

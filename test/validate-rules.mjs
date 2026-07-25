@@ -14,6 +14,21 @@ const VALID_RESOURCE_TYPES = new Set([
 const MALWARE_PRIORITY = 2000000;
 const MAX_DECLARED_RULESETS = 100;
 
+// Security feeds embed operator credentials in malware C2 and phishing URLs
+// (api.telegram.org/bot<token>/..., one-time JWT lures). Packaging those trips
+// secret scanners and republishes someone else's credentials, so the build drops
+// them and this check makes the invariant enforceable in CI.
+const CREDENTIAL_PATTERNS = [
+  ["telegram bot token", /\/bot\d{6,12}:[A-Za-z0-9_-]{30,}/],
+  ["AWS access key id", /\b(AKIA|ASIA)[0-9A-Z]{16}\b/],
+  ["Google API key", /\bAIza[0-9A-Za-z_-]{35}\b/],
+  ["Slack token", /\bxox[abprs]-[0-9A-Za-z-]{10,}/],
+  ["GitHub token", /\b(ghp|gho|ghs|ghu)_[A-Za-z0-9]{36}\b/],
+  ["Stripe key", /\b(sk|rk)_(live|test)_[A-Za-z0-9]{20,}/],
+  ["SendGrid key", /\bSG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/],
+  ["JWT", /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/]
+];
+
 // DNR urlFilter: ASCII only; "||" domain anchor may not be followed by "*";
 // "|" is an anchor only at the very start/end, never mid-pattern.
 function invalidUrlFilter(value) {
@@ -116,6 +131,11 @@ for (const resource of resources) {
     if (!hasNarrowing) note(`${resource.id}: rule ${rule.id} has no narrowing and would match every request`);
     if (invalidUrlFilter(condition.urlFilter)) {
       note(`${resource.id}: rule ${rule.id} has an invalid urlFilter "${condition.urlFilter}"`);
+    }
+    const pattern = condition.urlFilter || condition.regexFilter || "";
+    for (const [label, regex] of CREDENTIAL_PATTERNS) {
+      // Report the match location only -- never echo the credential itself.
+      if (regex.test(pattern)) note(`${resource.id}: rule ${rule.id} embeds a ${label}; the build must drop it`);
     }
     // Static regexFilter is compiled by RE2, which rejects lookaround and
     // backreferences that JavaScript accepts. The build skips regex entirely.
