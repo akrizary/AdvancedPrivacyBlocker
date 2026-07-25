@@ -1,0 +1,85 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><link rel="stylesheet" href="options.css"></head>
+<body>
+  <header><div><h1>Advanced Privacy Blocker</h1><p>Protection, tracker intelligence, consent automation and diagnostics.</p></div><span id="version"></span></header>
+
+  <main>
+    <section>
+      <h2>Core protection</h2>
+      <div id="settings" class="settings-grid"></div>
+    </section>
+
+    <section>
+      <div class="section-head"><div><h2>Filter lists</h2><p>Remote lists are privileged filtering input. Add only sources you trust.</p></div><button id="update" class="primary">Update now</button></div>
+      <h3>Built in</h3><div id="builtin" class="list"></div>
+      <h3>Custom subscriptions</h3><div id="custom" class="list"></div>
+      <div class="add-row">
+        <input id="listName" placeholder="List name">
+        <input id="listUrl" type="url" placeholder="https://example.org/filter.txt">
+        <select id="listFeature"><option value="ads">Ads</option><option value="tracking">Tracking</option><option value="annoyances">Annoyances</option><option value="malware">Malware</option><option value="custom">Custom</option></select>
+        <button id="addList">Add</button>
+      </div>
+      <p id="listError" class="error"></p>
+      <h3>Direct custom filters</h3>
+      <p>Enter standard network or cosmetic rules, one per line. Up to 5,000 network rules are reserved ahead of remote-list allocation.</p>
+      <textarea id="customFilterText" spellcheck="false" placeholder="||tracker.example^
+example.com##.sponsored
+@@||cdn.example.com^$domain=example.com"></textarea>
+      <div class="editor-actions"><small id="customFilterSize">0 / 1,048,576 bytes</small><button id="applyCustomFilters" class="primary">Apply custom filters</button></div>
+    </section>
+
+    <section>
+      <h2>Protection schedule and trust</h2>
+      <div class="pause-row">
+        <select id="globalPause"><option value="3600000">Pause globally for 1 hour</option><option value="86400000">Pause globally for 1 day</option></select>
+        <button id="pauseGlobal">Pause</button><button id="resumeGlobal">Resume global protection</button>
+      </div>
+      <h3>Excluded (trusted) sites</h3>
+      <p>Trusted sites are fully excluded from all filtering. Add a domain to always allow it.</p>
+      <div class="add-row">
+        <input id="trustDomain" type="text" placeholder="example.com">
+        <select id="trustDomainDuration"><option value="0">Always</option><option value="86400000">1 day</option><option value="3600000">1 hour</option></select>
+        <button id="addTrust">Add excluded site</button>
+      </div>
+      <p id="trustError" class="error"></p>
+      <div id="trustList" class="list"></div>
+      <h3>Per-site image allowances</h3>
+      <p>Sites where all images are permitted (including third-party image CDNs) while malware and malvertising blocking stays active.</p>
+      <div id="imageAllowList" class="list"></div>
+      <h3>Individual tracker rules</h3>
+      <p>Overrides created from the popup. “Allow” or “block” applies to that tracker when initiated by the listed site.</p>
+      <div id="trackerOverrides" class="list"></div>
+    </section>
+
+    <section>
+      <h2>Custom element removals</h2>
+      <p>Selectors created by <b>Zap an element</b> are stored locally per domain.</p>
+      <div id="zaps" class="list"></div>
+    </section>
+
+    <section>
+      <h2>Diagnostics</h2>
+      <div id="diagnosticCards" class="cards"></div>
+      <h3>Per-list contribution</h3>
+      <div class="table-wrap"><table><thead><tr><th>List</th><th>Feature</th><th>Rules</th><th>Block</th><th>Allow</th><th>Cosmetic</th><th>Status</th></tr></thead><tbody id="statsBody"></tbody></table></div>
+      <h3>Broad exception audit <span id="flagCount" class="badge">0</span></h3>
+      <div id="audit" class="audit"></div>
+    </section>
+
+    <section>
+      <h2>Data and maintenance</h2>
+      <div class="button-row">
+        <button id="exportConfig">Export configuration</button>
+        <button id="importConfig">Import configuration</button>
+        <input id="importFile" type="file" accept="application/json" hidden>
+        <button id="exportRules">Export dynamic rules</button>
+        <button id="clearStats">Clear activity counters</button>
+      </div>
+      <p class="note">The extension has no account requirement or browsing-history upload. Network access is used for enabled filter-list downloads.</p>
+    </section>
+    <p id="status" class="status"></p>
+  </main>
+<script src="options.js"></script>
+</body>
+</html>

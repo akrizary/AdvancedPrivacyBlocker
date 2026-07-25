@@ -1,0 +1,34 @@
+[
+  { "id": 1001, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||google-analytics.com^" } },
+  { "id": 1002, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||analytics.tiktok.com^" } },
+  { "id": 1003, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||connect.facebook.net^" } },
+  { "id": 1004, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||scorecardresearch.com^" } },
+  { "id": 1005, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||hotjar.com^" } },
+  { "id": 1006, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||mixpanel.com^" } },
+  { "id": 1007, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||segment.io^" } },
+  { "id": 1008, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||fullstory.com^" } },
+  { "id": 1009, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||amplitude.com^" } },
+  { "id": 1010, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||branch.io^" } },
+  { "id": 1011, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||chartbeat.com^" } },
+  { "id": 1012, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||newrelic.com^" } },
+  { "id": 1013, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||nr-data.net^" } },
+  { "id": 1014, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||sentry.io^", "domainType": "thirdParty" } },
+  { "id": 1015, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||mouseflow.com^" } },
+  { "id": 1016, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||clarity.ms^" } },
+  { "id": 1017, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||yandex.ru/metrika^" } },
+  { "id": 1018, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||mc.yandex.ru^" } },
+  { "id": 1019, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||stats.g.doubleclick.net^" } },
+  { "id": 1020, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||analytics.twitter.com^" } },
+  { "id": 1021, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||bat.bing.com^" } },
+  { "id": 1022, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||snowplowanalytics.com^" } },
+  { "id": 1023, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||heap.io^" } },
+  { "id": 1024, "priority": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||kissmetrics.com^" } },
+  { "id": 1025,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [{ "header": "referer", "operation": "remove" }]
+    },
+    "condition": { "domainType": "thirdParty", "resourceTypes": ["image","ping","xmlhttprequest"] }
+  }
+]

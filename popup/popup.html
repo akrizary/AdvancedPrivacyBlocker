@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><link rel="stylesheet" href="popup.css"></head>
+<body>
+  <header>
+    <div><h1>Advanced Privacy Blocker</h1><p id="domain">—</p></div>
+    <span id="statusPill" class="pill">Protected</span>
+  </header>
+
+  <section class="scoreboard">
+    <div><strong id="blocked">0</strong><span>blocked</span></div>
+    <div><strong id="detected">0</strong><span>trackers</span></div>
+    <div><strong id="rules">0</strong><span>active rules</span></div>
+  </section>
+
+  <section class="features">
+    <label><span><b>Ad blocking</b><small>Network + cosmetic rules</small></span><input type="checkbox" data-setting="adBlocking"></label>
+    <label><span><b>Anti-tracking</b><small>Trackers, parameters, GPC/DNT</small></span><input type="checkbox" data-setting="antiTracking"></label>
+    <label><span><b>Never-consent</b><small>Reject supported cookie banners</small></span><input type="checkbox" data-setting="neverConsent"></label>
+    <label><span><b>Security</b><small>Known malware destinations</small></span><input type="checkbox" data-setting="malwareProtection"></label>
+  </section>
+
+  <section class="features allowances">
+    <div class="section-title"><h2>Loosen (reading mode)</h2></div>
+    <label><span><b>Allow images</b><small>Never block images — fixes broken comics/manga</small></span><input type="checkbox" data-setting="allowImages"></label>
+    <label><span><b>Allow media</b><small>Never block video/audio requests</small></span><input type="checkbox" data-setting="allowMedia"></label>
+  </section>
+
+  <section>
+    <div class="section-title"><h2>Trackers on this page</h2><span id="trackerSummary"></span></div>
+    <div id="trackers" class="trackers"><p class="empty">No recognized trackers yet.</p></div>
+  </section>
+
+  <section class="site-image">
+    <label><span><b>Allow images on this site only</b><small>Permit all images on this site (incl. its image CDN); malware &amp; malvertising stay blocked</small></span><input type="checkbox" id="allowImagesHere"></label>
+  </section>
+
+  <section class="actions">
+    <button id="zap">Zap an element</button>
+    <select id="trustDuration" aria-label="Trust duration">
+      <option value="3600000">Trust 1 hour</option>
+      <option value="86400000">Trust 1 day</option>
+      <option value="0">Trust always</option>
+    </select>
+    <button id="trust" class="secondary">Trust site</button>
+    <button id="resume" class="secondary hidden">Resume protection</button>
+  </section>
+
+  <footer>
+    <button id="update" class="link">Update lists</button>
+    <button id="options" class="link">Settings</button>
+    <span id="message"></span>
+  </footer>
+  <script src="popup.js"></script>
+</body>
+</html>

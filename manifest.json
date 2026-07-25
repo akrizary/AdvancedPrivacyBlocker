@@ -1,0 +1,314 @@
+{
+  "manifest_version": 3,
+  "name": "Advanced Privacy Blocker",
+  "short_name": "Privacy Blocker",
+  "version": "2.1.0",
+  "description": "Blocks ads, trackers, consent popups, known malware destinations and distractions with tracker intelligence and privacy controls.",
+  "minimum_chrome_version": "121",
+  "permissions": [
+    "declarativeNetRequest",
+    "declarativeNetRequestFeedback",
+    "storage",
+    "unlimitedStorage",
+    "scripting",
+    "tabs",
+    "alarms",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "options_page": "options/options.html",
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": "icons/32.png"
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "lib/content-tools.js",
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "core_ads",
+        "enabled": true,
+        "path": "rules/ads.json"
+      },
+      {
+        "id": "core_trackers",
+        "enabled": true,
+        "path": "rules/trackers.json"
+      },
+      {
+        "id": "core_annoyances",
+        "enabled": true,
+        "path": "rules/annoyances.json"
+      },
+      {
+        "id": "core_malware",
+        "enabled": true,
+        "path": "rules/malware.json"
+      },
+      {
+        "id": "backup",
+        "enabled": false,
+        "path": "rules/backup_ruleset.json"
+      },
+      {
+        "id": "ads_static_0",
+        "enabled": false,
+        "path": "rules/generated/ads_static_0.json"
+      },
+      {
+        "id": "ads_static_1",
+        "enabled": false,
+        "path": "rules/generated/ads_static_1.json"
+      },
+      {
+        "id": "ads_static_2",
+        "enabled": false,
+        "path": "rules/generated/ads_static_2.json"
+      },
+      {
+        "id": "ads_static_3",
+        "enabled": false,
+        "path": "rules/generated/ads_static_3.json"
+      },
+      {
+        "id": "ads_static_4",
+        "enabled": false,
+        "path": "rules/generated/ads_static_4.json"
+      },
+      {
+        "id": "ads_static_5",
+        "enabled": false,
+        "path": "rules/generated/ads_static_5.json"
+      },
+      {
+        "id": "ads_static_6",
+        "enabled": false,
+        "path": "rules/generated/ads_static_6.json"
+      },
+      {
+        "id": "tracking_static_0",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_0.json"
+      },
+      {
+        "id": "tracking_static_1",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_1.json"
+      },
+      {
+        "id": "tracking_static_2",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_2.json"
+      },
+      {
+        "id": "tracking_static_3",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_3.json"
+      },
+      {
+        "id": "tracking_static_4",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_4.json"
+      },
+      {
+        "id": "tracking_static_5",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_5.json"
+      },
+      {
+        "id": "tracking_static_6",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_6.json"
+      },
+      {
+        "id": "tracking_static_7",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_7.json"
+      },
+      {
+        "id": "tracking_static_8",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_8.json"
+      },
+      {
+        "id": "tracking_static_9",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_9.json"
+      },
+      {
+        "id": "tracking_static_10",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_10.json"
+      },
+      {
+        "id": "tracking_static_11",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_11.json"
+      },
+      {
+        "id": "tracking_static_12",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_12.json"
+      },
+      {
+        "id": "tracking_static_13",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_13.json"
+      },
+      {
+        "id": "tracking_static_14",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_14.json"
+      },
+      {
+        "id": "tracking_static_15",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_15.json"
+      },
+      {
+        "id": "tracking_static_16",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_16.json"
+      },
+      {
+        "id": "tracking_static_17",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_17.json"
+      },
+      {
+        "id": "tracking_static_18",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_18.json"
+      },
+      {
+        "id": "tracking_static_19",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_19.json"
+      },
+      {
+        "id": "tracking_static_20",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_20.json"
+      },
+      {
+        "id": "tracking_static_21",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_21.json"
+      },
+      {
+        "id": "tracking_static_22",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_22.json"
+      },
+      {
+        "id": "tracking_static_23",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_23.json"
+      },
+      {
+        "id": "tracking_static_24",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_24.json"
+      },
+      {
+        "id": "annoyances_static_0",
+        "enabled": false,
+        "path": "rules/generated/annoyances_static_0.json"
+      },
+      {
+        "id": "annoyances_static_1",
+        "enabled": false,
+        "path": "rules/generated/annoyances_static_1.json"
+      },
+      {
+        "id": "annoyances_static_2",
+        "enabled": false,
+        "path": "rules/generated/annoyances_static_2.json"
+      },
+      {
+        "id": "malware_static_0",
+        "enabled": false,
+        "path": "rules/generated/malware_static_0.json"
+      },
+      {
+        "id": "malware_static_1",
+        "enabled": false,
+        "path": "rules/generated/malware_static_1.json"
+      },
+      {
+        "id": "malware_static_2",
+        "enabled": false,
+        "path": "rules/generated/malware_static_2.json"
+      },
+      {
+        "id": "malware_static_3",
+        "enabled": false,
+        "path": "rules/generated/malware_static_3.json"
+      },
+      {
+        "id": "malware_static_4",
+        "enabled": false,
+        "path": "rules/generated/malware_static_4.json"
+      },
+      {
+        "id": "malware_static_5",
+        "enabled": false,
+        "path": "rules/generated/malware_static_5.json"
+      },
+      {
+        "id": "malware_static_6",
+        "enabled": false,
+        "path": "rules/generated/malware_static_6.json"
+      },
+      {
+        "id": "malware_static_7",
+        "enabled": false,
+        "path": "rules/generated/malware_static_7.json"
+      },
+      {
+        "id": "malware_static_8",
+        "enabled": false,
+        "path": "rules/generated/malware_static_8.json"
+      },
+      {
+        "id": "malware_static_9",
+        "enabled": false,
+        "path": "rules/generated/malware_static_9.json"
+      },
+      {
+        "id": "malware_static_10",
+        "enabled": false,
+        "path": "rules/generated/malware_static_10.json"
+      },
+      {
+        "id": "malware_static_11",
+        "enabled": false,
+        "path": "rules/generated/malware_static_11.json"
+      }
+    ]
+  }
+}
