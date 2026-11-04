@@ -1,4 +1,4 @@
-# Validation Report — Advanced Privacy Blocker 2.2.0
+# Validation Report — Advanced Privacy Blocker 2.3.0
 
 Generated: 2026-07-25
 

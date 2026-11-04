@@ -13,8 +13,17 @@ const BUILTIN_LISTS = Object.freeze([
   { id: "urlhaus-online", name: "URLHaus Online Malware", url: "https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-ag-online.txt", feature: "malware", enabled: true },
   { id: "phishing-online", name: "Phishing & Malvertising (malware-filter)", url: "https://malware-filter.gitlab.io/malware-filter/phishing-filter-ag.txt", feature: "malware", enabled: true },
   { id: "botnet-c2", name: "Botnet C2 / malware callbacks", url: "https://malware-filter.gitlab.io/malware-filter/botnet-filter-ag.txt", feature: "malware", enabled: true },
-  { id: "pup-adware", name: "PUP & adware destinations", url: "https://malware-filter.gitlab.io/pup-filter/pup-filter-ag.txt", feature: "malware", enabled: true },
+  // "pup-adware" (malware-filter.gitlab.io/pup-filter) was removed in 2.3.0. It
+  // still returns HTTP 200 - so the refresh never reported a failure - but the feed
+  // itself says "Daily update has been paused" and has not changed since
+  // 2023-05-14, serving 189 rules. Stale security data shown as live protection is
+  // misleading, and HaGeZi TIF covers the same ground with daily updates.
   { id: "spam-tlds", name: "Spam TLDs (throwaway ad domains)", url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/spam-tlds.txt", feature: "malware", enabled: true },
+  // Popunder/popup ad infrastructure (77,681 rules). Malvertising is the main
+  // delivery channel for fake-CAPTCHA pages, so this complements clickfix-guard.js.
+  // Shipped DISABLED: the dynamic layer interleaves lists into a ~29k cap, so a
+  // list this size would crowd out EasyList/EasyPrivacy.
+  { id: "popup-ads", name: "Pop-up & popunder ad infrastructure (heavy, opt-in)", url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/popupads.txt", feature: "annoyances", enabled: false },
   { id: "dandelion-antimalware", name: "Dandelion Sprout Anti-Malware", url: "https://raw.githubusercontent.com/DandelionSprout/adfilt/master/Alternate%20versions%20Anti-Malware%20List/AntiMalwareAdGuard.txt", feature: "malware", enabled: true },
   // Broad threat-intelligence feed (~450k rules, 9 MB). Shipped DISABLED: the
   // dynamic layer interleaves lists into a ~29k cap, so a list this large would
@@ -74,6 +83,7 @@ let privacySyncQueue = Promise.resolve();
 let privacyScriptSyncQueue = Promise.resolve();
 let scriptletSyncQueue = Promise.resolve();
 let popupGuardSyncQueue = Promise.resolve();
+let clickfixGuardSyncQueue = Promise.resolve();
 let trustSyncQueue = Promise.resolve();
 let statsWriteQueue = Promise.resolve();
 let trustMutationQueue = Promise.resolve();
@@ -586,6 +596,33 @@ async function syncPopupGuardCore() {
   }
 }
 
+async function syncClickfixGuard() {
+  clickfixGuardSyncQueue = clickfixGuardSyncQueue.catch(() => {}).then(syncClickfixGuardCore);
+  return clickfixGuardSyncQueue;
+}
+
+async function syncClickfixGuardCore() {
+  const settings = await getSettings();
+  const id = "advanced-blocker-clickfix-guard";
+  try {
+    const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [id] });
+    if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: [id] });
+    if (settings.clickfixGuard) {
+      await chrome.scripting.registerContentScripts([{
+        id,
+        matches: ["http://*/*", "https://*/*"],
+        js: ["clickfix-guard.js"],
+        allFrames: true,
+        runAt: "document_start",
+        world: "MAIN",
+        persistAcrossSessions: true
+      }]);
+    }
+  } catch (error) {
+    console.warn("Could not register MAIN-world ClickFix guard", error);
+  }
+}
+
 async function scheduleRefresh() {
   const settings = await getSettings();
   const period = Math.max(30, Number(settings.refreshMinutes) || DEFAULT_SETTINGS.refreshMinutes);
@@ -973,6 +1010,7 @@ async function syncAll({ updateLists = false } = {}) {
     syncPrivacyContentScript(),
     syncScriptlets(),
     syncPopupGuard(),
+    syncClickfixGuard(),
     applyTrustRules(),
     scheduleRefresh()
   ]);
@@ -1060,7 +1098,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (changes.settings) {
     cosmeticHostCache.clear();
-    Promise.allSettled([syncStaticRulesets(), syncPrivacyRules(), syncPrivacyContentScript(), syncScriptlets(), syncPopupGuard(), applyTrustRules(), scheduleRefresh()]);
+    Promise.allSettled([syncStaticRulesets(), syncPrivacyRules(), syncPrivacyContentScript(), syncScriptlets(), syncPopupGuard(), syncClickfixGuard(), applyTrustRules(), scheduleRefresh()]);
   }
   if (changes.trustEntries || changes.globalPauseUntil || changes.imageAllowances) applyTrustRules();
   if (changes.trackerOverrides) syncPrivacyRules();
@@ -1155,7 +1193,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // tab close in that window could tear it down mid-handler. Jobs are
         // idempotent and also re-triggered by the storage.onChanged listener.
         sendResponse({ ok: true, settings });
-        const jobs = [syncStaticRulesets(), syncPrivacyRules(), syncPrivacyContentScript(), syncScriptlets(), syncPopupGuard(), applyTrustRules()];
+        const jobs = [syncStaticRulesets(), syncPrivacyRules(), syncPrivacyContentScript(), syncScriptlets(), syncPopupGuard(), syncClickfixGuard(), applyTrustRules()];
         if (["adBlocking", "antiTracking", "annoyances", "malwareProtection"].includes(message.key)) jobs.push(refreshFilters());
         Promise.allSettled(jobs).catch(() => {});
         return;
@@ -1167,7 +1205,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         const settings = await setSettings(patch);
         sendResponse({ ok: true, settings });
-        const jobs = [syncStaticRulesets(), syncPrivacyRules(), syncPrivacyContentScript(), syncScriptlets(), syncPopupGuard(), applyTrustRules(), scheduleRefresh()];
+        const jobs = [syncStaticRulesets(), syncPrivacyRules(), syncPrivacyContentScript(), syncScriptlets(), syncPopupGuard(), syncClickfixGuard(), applyTrustRules(), scheduleRefresh()];
         if (["adBlocking", "antiTracking", "annoyances", "malwareProtection"].some(key => Object.prototype.hasOwnProperty.call(patch, key))) jobs.push(refreshFilters());
         Promise.allSettled(jobs).catch(() => {});
         return;

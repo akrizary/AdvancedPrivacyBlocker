@@ -1,4 +1,4 @@
-# Ghostery-Class Capability Matrix — v2.2.0
+# Ghostery-Class Capability Matrix — v2.3.0
 
 This extension implements independent functional equivalents. It does not contain Ghostery branding, private datasets, proprietary heuristics or hosted telemetry infrastructure.
 
@@ -12,7 +12,7 @@ This extension implements independent functional equivalents. It does not contai
 | Known malware destinations | URLHaus, phishing/malvertising, botnet C2, PUP/adware and spam-TLD feeds at the top priority band | Implemented | List-based only: no scanning, behavioural analysis or ransomware detection, and novel domains are unknown until a feed catches them |
 | Tracker identification | Local company/category catalog and heuristics | Implemented | Curated catalog is smaller than commercial tracker intelligence |
 | Per-page tracker report | Blocked/observed tracker aggregation | Implemented | Exact blocked-event diagnostics are strongest when unpacked |
-| Tracking-parameter cleaning | Same-site-safe navigation and broader third-party sanitization | Implemented | Encrypted, opaque and server-side identifiers cannot be sanitized |
+| Tracking-parameter cleaning | Same-site-safe navigation and broader third-party sanitization; covers `webtransport`/`webbundle`/`csp_report` as well as the classic resource types | Implemented | Encrypted, opaque and server-side identifiers cannot be sanitized |
 | Redirect unwrapping | Known search/social click-wrapper cleaning | Implemented | Unknown/proprietary redirect formats may pass |
 | GPC | JavaScript signal plus request header where accepted | Implemented | Site compliance depends on law and site behavior |
 | DNT | JavaScript signal plus request header where accepted | Implemented | DNT is only a preference signal |
@@ -26,6 +26,7 @@ This extension implements independent functional equivalents. It does not contai
 | App-banner suppression | Common install/open-in-app selectors | Implemented | Heuristic selectors can require exceptions |
 | Shorts/Reels suppression | Optional interface selectors | Implemented | Platform markup changes can reduce coverage |
 | Popunder / click-hijack blocking | MAIN-world `window.open` guard with intent heuristics | Implemented | Same-tab hijacks cannot be intercepted because `window.location` is unforgeable |
+| ClickFix / fake-CAPTCHA clipboard guard | MAIN-world wrapper over all four clipboard write paths; blocks on CAPTCHA-lure wrappers, hidden-execution flags or a page-initiated write, warns on anything else command-shaped | Implemented | Classifies a string, not intent: an installer one-liner and a payload can be byte-identical, so ambiguous cases warn rather than block. A user who types a command from an image is unreachable |
 | Redirect activity log | Local capped log of blocked popunders and unexplained cross-site navigations, with one-click domain blocking | Implemented | "Unexplained" is a heuristic label; JS navigations and form posts can appear |
 | Page-side scriptlets | MAIN-world neutralizers for anti-adblock bait and right-click/selection blockers | Implemented | Conservative default rule set; per-site scriptlet rules need testing before adding |
 | Resource-type loosening | Global image/media/font allowances and per-site image allowance | Implemented | A type-level allowance also permits ad images of that type; security rules still outrank it |
@@ -42,7 +43,7 @@ This extension implements independent functional equivalents. It does not contai
 | Concurrency protection | Serialized settings and protection-state writes | Implemented | External storage edits remain outside transactional control |
 | Build provenance | Per-ruleset source, feature, index, rule count and exception ids in `ruleset-metadata.json` | Implemented | Lists are fetched at build time; no byte counts or SHA-256 hashes are recorded, so builds are not bit-reproducible over time |
 | Ruleset integrity checking | `npm run validate` re-checks all packaged rules against Chromium DNR constraints | Implemented | Encodes documented constraints; not a substitute for a real browser load |
-| CNAME-cloaking unmasking | None on Chromium | Not implemented | Ordinary Chromium extension APIs do not expose required DNS resolution |
+| CNAME-cloaking unmasking | Packaged list of observed cloaked first-party hostnames (~8,500, filtered from AdGuard's ~303,000-rule list against the rules compiled in the same build) | Partial | List-based only: Chromium extensions cannot resolve DNS, so a newly cloaked hostname is invisible until AdGuard observes it. No live uncloaking as on Firefox |
 | Ghostery heuristic anonymization | Deterministic sanitization only | Not reproduced | Proprietary implementation unavailable |
 | Full Ghostery TrackerDB | Smaller local catalog/public lists | Not reproduced | Dataset and license differ |
 | WhoTracks.Me contribution | None | Not implemented | No custom tracking telemetry endpoint |

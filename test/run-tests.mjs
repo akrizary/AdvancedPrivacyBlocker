@@ -12,7 +12,7 @@ const store = {};
 
 globalThis.chrome = {
   runtime: {
-    getManifest: () => ({ version: "2.2.0", declarative_net_request: { rule_resources: [] } }),
+    getManifest: () => ({ version: "2.3.0", declarative_net_request: { rule_resources: [] } }),
     getURL: p => "file://" + p,
     onInstalled: noopEvent(), onStartup: noopEvent(),
     onMessage: { addListener: fn => { listeners.message = fn; } }
@@ -71,6 +71,12 @@ let failed = 0;
 const converterTests = await import("../lib/converter.test.js");
 const converterResult = await converterTests.runTests();
 failed += converterResult.failed;
+
+// --- 1b. hardening tests (2.3.0): builder option handling, CNAME residue,
+//         ClickFix classifier. Runs before background.js is imported so the
+//         sandboxed guard load cannot see the mocked chrome.*.
+const hardeningTests = await import("./hardening.test.mjs");
+failed += hardeningTests.runTests().failed;
 
 // --- 2. service-worker handler smoke test -----------------------------------
 await import("../background.js");

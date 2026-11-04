@@ -1,4 +1,4 @@
-# Advanced Privacy Blocker 2.2.0
+# Advanced Privacy Blocker 2.3.0
 
 [![CI](https://github.com/akrizary/AdvancedPrivacyBlocker/actions/workflows/ci.yml/badge.svg)](https://github.com/akrizary/AdvancedPrivacyBlocker/actions/workflows/ci.yml)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSE)

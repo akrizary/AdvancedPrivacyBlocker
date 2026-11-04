@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Advanced Privacy Blocker",
   "short_name": "Privacy Blocker",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Blocks ads, trackers, consent popups, known malware destinations, popunder hijacks and distractions with tracker intelligence and privacy controls.",
   "minimum_chrome_version": "121",
   "permissions": [
@@ -103,11 +103,6 @@
         "id": "ads_static_5",
         "enabled": false,
         "path": "rules/generated/ads_static_5.json"
-      },
-      {
-        "id": "ads_static_6",
-        "enabled": false,
-        "path": "rules/generated/ads_static_6.json"
       },
       {
         "id": "tracking_static_0",
@@ -235,6 +230,121 @@
         "path": "rules/generated/tracking_static_24.json"
       },
       {
+        "id": "tracking_static_25",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_25.json"
+      },
+      {
+        "id": "tracking_static_26",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_26.json"
+      },
+      {
+        "id": "tracking_static_27",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_27.json"
+      },
+      {
+        "id": "tracking_static_28",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_28.json"
+      },
+      {
+        "id": "tracking_static_29",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_29.json"
+      },
+      {
+        "id": "tracking_static_30",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_30.json"
+      },
+      {
+        "id": "tracking_static_31",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_31.json"
+      },
+      {
+        "id": "tracking_static_32",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_32.json"
+      },
+      {
+        "id": "tracking_static_33",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_33.json"
+      },
+      {
+        "id": "tracking_static_34",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_34.json"
+      },
+      {
+        "id": "tracking_static_35",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_35.json"
+      },
+      {
+        "id": "tracking_static_36",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_36.json"
+      },
+      {
+        "id": "tracking_static_37",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_37.json"
+      },
+      {
+        "id": "tracking_static_38",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_38.json"
+      },
+      {
+        "id": "tracking_static_39",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_39.json"
+      },
+      {
+        "id": "tracking_static_40",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_40.json"
+      },
+      {
+        "id": "tracking_static_41",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_41.json"
+      },
+      {
+        "id": "tracking_static_42",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_42.json"
+      },
+      {
+        "id": "tracking_static_43",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_43.json"
+      },
+      {
+        "id": "tracking_static_44",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_44.json"
+      },
+      {
+        "id": "tracking_static_45",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_45.json"
+      },
+      {
+        "id": "tracking_static_46",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_46.json"
+      },
+      {
+        "id": "tracking_static_47",
+        "enabled": false,
+        "path": "rules/generated/tracking_static_47.json"
+      },
+      {
         "id": "annoyances_static_0",
         "enabled": false,
         "path": "rules/generated/annoyances_static_0.json"
@@ -308,6 +418,56 @@
         "id": "malware_static_11",
         "enabled": false,
         "path": "rules/generated/malware_static_11.json"
+      },
+      {
+        "id": "malware_static_12",
+        "enabled": false,
+        "path": "rules/generated/malware_static_12.json"
+      },
+      {
+        "id": "malware_static_13",
+        "enabled": false,
+        "path": "rules/generated/malware_static_13.json"
+      },
+      {
+        "id": "malware_static_14",
+        "enabled": false,
+        "path": "rules/generated/malware_static_14.json"
+      },
+      {
+        "id": "malware_static_15",
+        "enabled": false,
+        "path": "rules/generated/malware_static_15.json"
+      },
+      {
+        "id": "malware_static_16",
+        "enabled": false,
+        "path": "rules/generated/malware_static_16.json"
+      },
+      {
+        "id": "malware_static_17",
+        "enabled": false,
+        "path": "rules/generated/malware_static_17.json"
+      },
+      {
+        "id": "malware_static_18",
+        "enabled": false,
+        "path": "rules/generated/malware_static_18.json"
+      },
+      {
+        "id": "malware_static_19",
+        "enabled": false,
+        "path": "rules/generated/malware_static_19.json"
+      },
+      {
+        "id": "malware_static_20",
+        "enabled": false,
+        "path": "rules/generated/malware_static_20.json"
+      },
+      {
+        "id": "malware_static_21",
+        "enabled": false,
+        "path": "rules/generated/malware_static_21.json"
       }
     ]
   }

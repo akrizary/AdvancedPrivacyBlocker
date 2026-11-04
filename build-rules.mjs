@@ -23,10 +23,38 @@ const LISTS = [
   { feature: "malware",    source: "URLHaus Online",        url: "https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-ag-online.txt" },
   { feature: "malware",    source: "Phishing/Malvertising", url: "https://malware-filter.gitlab.io/malware-filter/phishing-filter-ag.txt" },
   { feature: "malware",    source: "Botnet C2",             url: "https://malware-filter.gitlab.io/malware-filter/botnet-filter-ag.txt" },
-  { feature: "malware",    source: "PUP/Adware",            url: "https://malware-filter.gitlab.io/pup-filter/pup-filter-ag.txt" },
+  // PUP/Adware (malware-filter.gitlab.io/pup-filter) was REMOVED: it still answers
+  // HTTP 200, so nothing here ever noticed, but its own header has said
+  // "Daily update has been paused" since 2023-05-14 and it serves 189 stale rules.
+  // A frozen feed presented as live protection is worse than no feed, and it only
+  // ever contributed 189 rules. HaGeZi's Threat Intelligence feed covers the same
+  // ground, but it is NOT baked in here: at 318,579 rules it would consume the
+  // whole static budget on its own, and because `malware` sorts first in
+  // STATIC_PRIORITY it would starve ads/tracking completely. It stays an opt-in
+  // dynamic subscription (`hagezi-tif` in background.js), which is the right
+  // trade-off to leave to the user.
   { feature: "malware",    source: "Spam TLDs",             url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/spam-tlds.txt" },
   { feature: "malware",    source: "Dandelion Anti-Malware", url: "https://raw.githubusercontent.com/DandelionSprout/adfilt/master/Alternate%20versions%20Anti-Malware%20List/AntiMalwareAdGuard.txt" }
 ];
+
+// CNAME-cloaked trackers. A tracker persuades the site to point a subdomain of the
+// SITE'S OWN domain at the tracker's server by DNS alias, so the request looks
+// first-party and no domain-based filter matches it. Chromium extensions cannot
+// resolve DNS (that is why uBlock Origin's uncloaking is Firefox-only), so the only
+// available defence is a filter list of hostnames observed to be cloaked.
+//
+// The raw AdGuard list is ~303,000 rules, which alone would exhaust Chromium's
+// ~330,000 shared static quota. Most of it is redundant here: the bulk are
+// subdomains of the trackers' own domains (26,330 under `tt.omtrdc.net` alone),
+// which EasyPrivacy and AdGuard Tracking already block outright. Filtering the
+// list against the rules we have just compiled leaves only the genuinely invisible
+// cases - cloaked subdomains of first-party sites - which is ~8,500 rules.
+const CNAME_SOURCE = {
+  feature: "tracking",
+  source: "AdGuard CNAME-cloaked trackers (residue)",
+  url: "https://raw.githubusercontent.com/AdguardTeam/cname-trackers/master/data/combined_disguised_trackers.txt"
+};
+const MAX_CNAME_RULES = 20000;
 
 const FEATURE_ORDER = ["ads", "tracking", "annoyances", "malware"];
 const MALWARE_BLOCK_PRIORITY = 2000000; // must stay above session allowances (see background.js)
@@ -41,6 +69,26 @@ const KNOWN_OPTS = new Set(["third-party","domain","script","image","stylesheet"
   "xmlhttprequest","subdocument","ping","media","font","websocket","other","document",
   "match-case","important","popup","genericblock","generichide","elemhide","csp","redirect",
   "redirect-rule","removeparam","all"]);
+
+// Options that change what a rule DOES, in ways a plain block/allow cannot express.
+// Ignoring them silently mis-compiles the rule, in both directions:
+//
+//   $redirect=noopjs   - the author wanted the script swapped for a harmless stub so
+//                        the page keeps working. A hard block breaks the page instead.
+//   $redirect-rule=... - only applies when the request would ALREADY be blocked.
+//                        Unconditional blocking is simply a different rule.
+//   $removeparam=...   - strip a query parameter. Blocking kills the whole request.
+//   $csp=...           - inject a header. Not a block at all.
+//   $elemhide,$generichide,$genericblock - scope EXCEPTIONS to cosmetic/generic
+//                        filtering only. Compiled as a network `allow` they would
+//                        unblock every request to the host: a protection hole.
+//
+// lib/converter.js already drops these at runtime (`unsupportedProcedural`); doing
+// the same here keeps the packaged baseline and the live layer consistent.
+const UNSUPPORTED_ACTION_OPTS = new Set([
+  "redirect", "redirect-rule", "removeparam", "csp", "replace", "permissions",
+  "elemhide", "generichide", "genericblock"
+]);
 
 // Security feeds record full malware C2 and phishing URLs, which sometimes embed
 // the operator's own credentials (e.g. api.telegram.org/bot<token>/... used for
@@ -128,6 +176,7 @@ function parseList(text) {
       const neg = opt.startsWith("~");
       const key = (neg ? opt.slice(1) : opt).split("=")[0];
       const val = opt.includes("=") ? opt.split("=")[1] : null;
+      if (UNSUPPORTED_ACTION_OPTS.has(key)) { dropRule = true; break; }
       if (TYPE_MAP[key]) (neg ? et : rt).add(TYPE_MAP[key]);
       else if (key === "third-party") condition.domainType = neg ? "firstParty" : "thirdParty";
       else if (key === "domain" && val) {
@@ -154,6 +203,62 @@ function parseList(text) {
     network.push({ priority: isException ? 2 : 1, action: { type: isException ? "allow" : "block" }, condition });
   }
   return { network, cosmetic };
+}
+
+// Hostnames already blocked outright by the rules we compiled, so a CNAME entry
+// for them would add nothing. Only unscoped, domain-anchored blocks count: a rule
+// narrowed by initiatorDomains does not cover the host globally.
+function coveredHostSet(featureData) {
+  const covered = new Set();
+  for (const feature of FEATURE_ORDER) {
+    for (const rule of featureData[feature].rules) {
+      if (rule.action.type !== "block") continue;
+      const c = rule.condition;
+      if (c.initiatorDomains || c.resourceTypes) continue;
+      const m = /^\|\|([a-z0-9.\-]+)\^?$/i.exec(c.urlFilter || "");
+      if (m) covered.add(m[1].toLowerCase());
+    }
+  }
+  return covered;
+}
+
+function isCoveredBy(covered, host) {
+  const parts = host.split(".");
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    if (covered.has(parts.slice(i).join("."))) return true;
+  }
+  return false;
+}
+
+// Keep only uncovered cloaked hosts, then compress: a host is redundant when a
+// listed parent already covers it (`||a.b.com^` covers `||x.a.b.com^`), and a
+// parent with three or more listed children is folded into one parent rule.
+function reduceCnameHosts(hosts, covered) {
+  const residue = hosts.filter(h => !isCoveredBy(covered, h));
+  const set = new Set(residue);
+  const kept = residue.filter(h => {
+    const parts = h.split(".");
+    for (let i = 1; i < parts.length - 1; i += 1) {
+      if (set.has(parts.slice(i).join("."))) return false;
+    }
+    return true;
+  });
+
+  const byParent = new Map();
+  for (const h of kept) {
+    const parts = h.split(".");
+    if (parts.length < 3) continue;
+    const parent = parts.slice(1).join(".");
+    if (!byParent.has(parent)) byParent.set(parent, []);
+    byParent.get(parent).push(h);
+  }
+  const final = new Set(kept);
+  for (const [parent, children] of byParent) {
+    if (children.length < 3) continue;
+    for (const h of children) final.delete(h);
+    final.add(parent);
+  }
+  return [...final].sort();
 }
 
 function dedupeCosmetic(list) {
@@ -184,6 +289,48 @@ async function main() {
     const fd = featureData[l.feature];
     for (const r of network) { r.__source = l.source; fd.rules.push(r); }
     for (const c of cosmetic) fd.cosmetic.push(c);
+  }
+
+  // CNAME residue runs last: it is filtered against everything fetched above, so a
+  // failed upstream fetch would only make this list larger, never wrong.
+  process.stdout.write(`Fetching ${CNAME_SOURCE.source}... `);
+  try {
+    const res = await fetch(CNAME_SOURCE.url, { cache: "no-cache" });
+    if (!res.ok) throw new Error(String(res.status));
+    const hosts = [];
+    for (const raw of (await res.text()).split("\n")) {
+      const line = raw.trim();
+      if (!line || line.startsWith("!")) continue;
+      const m = /^\|\|([^^/$]+)\^?$/.exec(line);
+      if (m) hosts.push(m[1].toLowerCase());
+    }
+    const covered = coveredHostSet(featureData);
+    const residue = reduceCnameHosts(hosts, covered).slice(0, MAX_CNAME_RULES);
+    const cnameRules = [];
+    for (const host of residue) {
+      if (/[^a-z0-9.\-]/.test(host)) continue; // non-ASCII/punycode-unsafe
+      // Deliberately NO domainType here. A cloaked host such as metrics.example.com
+      // requested from example.com is FIRST-party by registrable domain - that is
+      // exactly why the cloaking works - so a `thirdParty` condition would stop the
+      // rule matching in the only situation it exists for.
+      cnameRules.push({
+        priority: 1,
+        action: { type: "block" },
+        condition: { urlFilter: `||${host}^` },
+        __source: CNAME_SOURCE.source
+      });
+    }
+    // PREPEND, do not append. syncStaticRulesets() enables generated rulesets by
+    // round-robin over ascending file index until the static quota or the
+    // 50-ruleset cap runs out, so with 48 tracking files only the earliest handful
+    // ever activate. Appended at the tail these rules would be packaged, validated,
+    // counted in the metadata - and never enabled. They lead the feature because
+    // nothing else provides this coverage: every other tracking rule here is a
+    // domain the shipped lists already block.
+    featureData[CNAME_SOURCE.feature].rules.unshift(...cnameRules);
+    console.log(`${hosts.length} listed -> ${cnameRules.length} not already covered (leading the tracking group)`);
+  } catch (e) {
+    console.log(`FAILED (${e.message}) - continuing without CNAME residue`);
   }
 
   const totalRules = FEATURE_ORDER.reduce((n, f) => n + featureData[f].rules.length, 0);
@@ -242,6 +389,24 @@ async function main() {
     .filter(r => !/_static_/.test(r.id));
   manifest.declarative_net_request = { rule_resources: [...preserved, ...ruleResources] };
   await writeFile("manifest.json", JSON.stringify(manifest, null, 2) + "\n");
+
+  // When an upstream feed shrinks, this run writes fewer files than the last one
+  // and the surplus stays on disk: no longer in the manifest, so never loaded, but
+  // still shipped inside the package. Report them rather than deleting, so the
+  // maintainer decides.
+  try {
+    const { readdir } = await import("node:fs/promises");
+    const referenced = new Set(ruleResources.map(r => r.path));
+    const orphans = (await readdir(OUT_DIR))
+      .filter(f => /_static_\d+\.json$/.test(f))
+      .map(f => `${OUT_DIR}/${f}`)
+      .filter(p => !referenced.has(p));
+    if (orphans.length) {
+      console.warn(`\nWARNING: ${orphans.length} unreferenced ruleset file(s) left from a previous build.`);
+      console.warn("They are no longer in the manifest but would still ship in the package:");
+      for (const p of orphans) console.warn(`  ${p}`);
+    }
+  } catch { /* reporting only */ }
 
   const perFeature = FEATURE_ORDER.map(f => {
     const files = metadata.filter(m => m.feature === f);
