@@ -41,6 +41,18 @@
 //     `irm get.scoop.sh | iex` is a real install command on scoop.sh and a textbook
 //     payload anywhere else -- which is why the decision below is a policy choice,
 //     not a detection problem.
+//   * Cross-realm reach depends on the browser injecting this script into
+//     page-created frames. `matchOriginAsFallback: true` on the registration is the
+//     platform mechanism for that and covers about:blank, about:srcdoc and blob:
+//     frames at document_start. A security review suggested going further and
+//     patching each new frame's prototypes from the top realm, by hooking the
+//     `contentWindow`/`contentDocument` getters on HTMLIFrameElement.prototype.
+//     That is deliberately NOT done: reaching into another realm's intrinsics on
+//     every frame access is far more likely to break ordinary pages than to catch
+//     an attack, it is still racy, and it duplicates what the injection already
+//     guarantees. The residual risk is a realm the browser declines to inject
+//     into, where this guard simply does not run -- which is the same boundary
+//     every other MAIN-world guard here has.
 //
 // background.js registers this only while the `clickfixGuard` setting is on.
 (() => {
@@ -331,6 +343,20 @@
   // only through the closure below. These two methods are effectively never
   // monkey-patched by legitimate code, so locking them carries little breakage
   // risk -- unlike `window.open`, which libraries do wrap (see popup-guard.js).
+  // Natives captured at document_start, before any page script runs, so later
+  // tampering with these prototypes cannot change how the guard reads data.
+  const nativeIncludes = Array.prototype.includes;
+  const nativeArrayFrom = Array.from;
+  const nativeBlobText = typeof Blob === "function" ? Blob.prototype.text : null;
+  const nativeItemGetType = typeof ClipboardItem === "function"
+    ? ClipboardItem.prototype.getType : null;
+  const nativeItemTypes = (() => {
+    try {
+      if (typeof ClipboardItem !== "function") return null;
+      return Object.getOwnPropertyDescriptor(ClipboardItem.prototype, "types")?.get || null;
+    } catch { return null; }
+  })();
+
   const lockMethod = (holder, name, build) => {
     try {
       const native = holder?.[name];
@@ -351,20 +377,67 @@
 
     if (clipboardProto) {
       lockMethod(clipboardProto, "writeText", (native) => function writeText(text) {
+        // Coerce EXACTLY ONCE, classify that primitive, and hand the SAME
+        // primitive to the native call. Classifying `text` and then forwarding
+        // `text` would be a time-of-check/time-of-use gap: an argument whose
+        // toString() returns a different value on each call gets coerced twice,
+        // once by us and once by the WebIDL binding, so
+        //
+        //   let n = 0;
+        //   writeText({ toString: () => n++ ? "powershell -c ..." : "hello" })
+        //
+        // would be classified as "hello" and written as the payload.
         // `this` keeps the call bound to whichever Clipboard instance was used.
-        if (intercept(text)) return Promise.resolve(); // resolve: callers chain .then()
-        return native.call(this, text);
+        const value = String(text);
+        if (intercept(value)) return Promise.resolve(); // resolve: callers chain .then()
+        return native.call(this, value);
       });
 
       lockMethod(clipboardProto, "write", (native) => async function write(items) {
-        try {
-          for (const item of items || []) {
-            if (!item?.types?.includes?.("text/plain")) continue;
-            const blob = await item.getType("text/plain");
-            if (intercept(await blob.text())) return;
-          }
-        } catch { /* unreadable item: fall through to native */ }
-        return native.call(this, items);
+        // Read each item through the natives captured at startup, never through
+        // its own properties. Platform objects are extensible, so a page can
+        // shadow the `types` getter or `getType` with an own property that
+        // reports no text while the native call still writes the real payload
+        // from the object's internal slots:
+        //
+        //   Object.defineProperty(item, "types", { value: [] });
+        //
+        // Captured accessors read the internal slots, so shadowing is inert.
+        //
+        // Snapshot the sequence ONCE and forward the snapshot. `items` is an
+        // attacker-controlled iterable, so iterating it here to classify and then
+        // handing the original to the native - which iterates it again - is the
+        // same time-of-check/time-of-use gap as the string coercion above, just
+        // with a different primitive: a custom Symbol.iterator can yield benign
+        // items on the first pass and payload items on the second. The snapshot is
+        // taken with a captured Array.from and walked by index, so neither a
+        // replaced Array.prototype[Symbol.iterator] nor a re-iterating source can
+        // make the native see anything the classifier did not.
+        const list = nativeArrayFrom(items || []);
+        let anomalous = false;
+        for (let i = 0; i < list.length; i += 1) {
+          const item = list[i];
+          let types;
+          try {
+            types = nativeItemTypes ? nativeItemTypes.call(item) : item?.types;
+          } catch { anomalous = true; continue; }
+          try {
+            if (!types || !nativeIncludes.call(types, "text/plain")) continue;
+            const blob = nativeItemGetType
+              ? await nativeItemGetType.call(item, "text/plain")
+              : await item.getType("text/plain");
+            const text = nativeBlobText ? await nativeBlobText.call(blob) : await blob.text();
+            if (intercept(String(text))) return;
+          } catch { anomalous = true; }
+        }
+        // An item we could not read is not proof of innocence. Say so rather than
+        // passing it through silently -- but warn instead of blocking, because a
+        // legitimate non-text item (an image from a "copy image" button) must
+        // still reach the clipboard.
+        if (anomalous) {
+          report("warn", describe("[unreadable clipboard item]"));
+        }
+        return native.call(this, list);
       });
     }
   } catch { /* clipboard unavailable (insecure context): nothing to guard */ }
@@ -382,13 +455,22 @@
   try {
     if (typeof DataTransfer === "function") {
       lockMethod(DataTransfer.prototype, "setData", (native) => function setData(format, data) {
+        // Coerce both arguments once, for the same time-of-check/time-of-use
+        // reason as writeText above, and pass the primitives on.
+        const fmt = String(format);
+        const value = String(data);
+        // No format allowlist. Matching only `text/plain`/`text` meant reasoning
+        // about how the browser normalises a format string ("TEXT/Plain", a
+        // trailing parameter, surrounding whitespace, the text -> text/plain and
+        // url -> text/uri-list aliases) and any mismatch between that reasoning
+        // and the engine would be a bypass. Classifying every string written
+        // through setData removes the differential entirely, and costs nothing:
+        // intercept() returns immediately for text with no command tokens, which
+        // is every ordinary copy.
         try {
-          if (/^(text\/plain|text|text\/x-moz-url)$/i.test(String(format)) &&
-              intercept(data)) {
-            return undefined; // silently drop: the clipboard keeps its old contents
-          }
+          if (intercept(value)) return undefined; // drop: clipboard keeps its old contents
         } catch { /* fall through to native */ }
-        return native.call(this, format, data);
+        return native.call(this, fmt, value);
       });
     }
   } catch { /* DataTransfer unavailable: the copy listener below still applies */ }

