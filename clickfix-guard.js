@@ -118,6 +118,11 @@
   const COPY_HINT = /\b(copy|copied|clipboard|duplicate|salin)\b/i;
 
   document.addEventListener("click", (event) => {
+    // Only real input counts. `document.dispatchEvent(new MouseEvent("click"))`
+    // is free for the page to call, so without this check a payload could
+    // manufacture a "user gesture" and turn its own block into a mere warning --
+    // defeating one of the three block conditions in decide().
+    if (!event.isTrusted) return;
     lastClickAt = Date.now();
     lastClickLooksLikeCopy = false;
     try {
@@ -129,12 +134,38 @@
     } catch { /* classification is best-effort */ }
   }, true);
 
-  const context = () => ({
-    // A clipboard write with no recent click is page-initiated by definition.
-    userGesture: Date.now() - lastClickAt < 1500,
-    fromCopyControl: Date.now() - lastClickAt < 1500 && lastClickLooksLikeCopy,
-    host: location.hostname.toLowerCase()
-  });
+  // The browser's own view of user activation, which page script cannot forge.
+  // Available from Chrome 115 and this extension requires 121, but it is still
+  // read defensively: a missing API must not silently assert activation.
+  const browserSaysActivated = () => {
+    try {
+      const ua = navigator.userActivation;
+      return ua ? Boolean(ua.isActive) : null;
+    } catch { return null; }
+  };
+
+  const context = () => {
+    const recentTrustedClick = Date.now() - lastClickAt < 1500;
+    return {
+      // `isTrusted` on the listener is what makes this sound: page script cannot
+      // mint a trusted event, so the gesture cannot be forged. navigator
+      // .userActivation is NOT used as a veto on top of that -- transient
+      // activation is consumed by other gated APIs, so a page that called one
+      // between the click and the copy would report isActive=false after a
+      // genuine click, and vetoing on it would block a legitimate copy button
+      // for no security gain. It is reported for diagnostics instead.
+      userGesture: recentTrustedClick,
+      browserActivation: browserSaysActivated(),
+      fromCopyControl: recentTrustedClick && lastClickLooksLikeCopy,
+      host: location.hostname.toLowerCase()
+    };
+  };
+  // Worth being clear about the limit of the gesture rule: in the usual ClickFix
+  // flow the user DOES click the fake "Verify" button, so a trusted click is
+  // present and this rule will not fire. That is by design -- `lure` and
+  // `stealth` are the signals that catch the common attack, and the gesture rule
+  // is the backstop for the fully automated variant that writes the clipboard
+  // with nothing clicked at all.
 
   // --- POLICY --------------------------------------------------------------
   // decide(payload, ctx) -> "allow" | "warn" | "block"
@@ -286,41 +317,84 @@
     return verdict === "block";
   }
 
-  // 1. navigator.clipboard.writeText -- the common path.
-  try {
-    const clipboard = navigator.clipboard;
-    if (clipboard && typeof clipboard.writeText === "function") {
-      const nativeWriteText = clipboard.writeText.bind(clipboard);
-      Object.defineProperty(clipboard, "writeText", {
-        configurable: true, writable: true,
-        value: function writeText(text) {
-          if (intercept(text)) return Promise.resolve(); // resolve: callers chain .then()
-          return nativeWriteText(text);
-        }
+  // Replace a method on its PROTOTYPE and lock the replacement down.
+  //
+  // Defining the wrapper on the `navigator.clipboard` instance instead would
+  // create an own property that merely shadows the prototype, and leaving it
+  // configurable/writable would let a page remove it in one line:
+  //
+  //     delete navigator.clipboard.writeText;   // prototype method reappears
+  //     navigator.clipboard.writeText = orig;   // or just overwrite it
+  //
+  // Either restores the unguarded function. Patching the prototype as
+  // non-configurable and non-writable closes both, and the original is reachable
+  // only through the closure below. These two methods are effectively never
+  // monkey-patched by legitimate code, so locking them carries little breakage
+  // risk -- unlike `window.open`, which libraries do wrap (see popup-guard.js).
+  const lockMethod = (holder, name, build) => {
+    try {
+      const native = holder?.[name];
+      if (typeof native !== "function") return false;
+      Object.defineProperty(holder, name, {
+        configurable: false, enumerable: false, writable: false,
+        value: build(native)
       });
-    }
+      return true;
+    } catch { return false; }
+  };
 
-    // 2. navigator.clipboard.write with a text/plain ClipboardItem.
-    if (clipboard && typeof clipboard.write === "function") {
-      const nativeWrite = clipboard.write.bind(clipboard);
-      Object.defineProperty(clipboard, "write", {
-        configurable: true, writable: true,
-        value: async function write(items) {
-          try {
-            for (const item of items || []) {
-              if (!item?.types?.includes?.("text/plain")) continue;
-              const blob = await item.getType("text/plain");
-              if (intercept(await blob.text())) return;
-            }
-          } catch { /* unreadable item: fall through to native */ }
-          return nativeWrite(items);
-        }
+  // 1 & 2. Clipboard.prototype.writeText / .write
+  try {
+    const clipboardProto = navigator.clipboard
+      ? Object.getPrototypeOf(navigator.clipboard)
+      : (typeof Clipboard === "function" ? Clipboard.prototype : null);
+
+    if (clipboardProto) {
+      lockMethod(clipboardProto, "writeText", (native) => function writeText(text) {
+        // `this` keeps the call bound to whichever Clipboard instance was used.
+        if (intercept(text)) return Promise.resolve(); // resolve: callers chain .then()
+        return native.call(this, text);
+      });
+
+      lockMethod(clipboardProto, "write", (native) => async function write(items) {
+        try {
+          for (const item of items || []) {
+            if (!item?.types?.includes?.("text/plain")) continue;
+            const blob = await item.getType("text/plain");
+            if (intercept(await blob.text())) return;
+          }
+        } catch { /* unreadable item: fall through to native */ }
+        return native.call(this, items);
       });
     }
   } catch { /* clipboard unavailable (insecure context): nothing to guard */ }
 
   // 3. A `copy` listener that rewrites what the user copies. Classic ClickFix:
   //    the user selects "verification text" and the page swaps in a command.
+  //
+  //    Intercepting at `setData` time rather than in a copy listener is what makes
+  //    this reliable. A listener cannot win on ordering: ours runs in the capture
+  //    phase, so a page handler attached to the target calls
+  //    `event.clipboardData.setData(...)` AFTER we have already read the event --
+  //    we would inspect empty data and wave the injection through. Wrapping
+  //    DataTransfer.prototype.setData sees the write whenever it happens, in any
+  //    handler, in any phase.
+  try {
+    if (typeof DataTransfer === "function") {
+      lockMethod(DataTransfer.prototype, "setData", (native) => function setData(format, data) {
+        try {
+          if (/^(text\/plain|text|text\/x-moz-url)$/i.test(String(format)) &&
+              intercept(data)) {
+            return undefined; // silently drop: the clipboard keeps its old contents
+          }
+        } catch { /* fall through to native */ }
+        return native.call(this, format, data);
+      });
+    }
+  } catch { /* DataTransfer unavailable: the copy listener below still applies */ }
+
+  //    The listener is kept as a second line of defence, for a page that replaces
+  //    the whole selection rather than calling setData.
   document.addEventListener("copy", (event) => {
     try {
       const injected = event.clipboardData?.getData?.("text/plain");
@@ -337,24 +411,22 @@
   }, true);
 
   // 4. document.execCommand("copy") against a page-controlled selection.
+  //    Patched on Document.prototype for the same reason as the clipboard methods.
   try {
-    const nativeExec = document.execCommand?.bind(document);
-    if (nativeExec) {
-      Object.defineProperty(document, "execCommand", {
-        configurable: true, writable: true,
-        value: function execCommand(command, ...rest) {
-          try {
-            if (String(command).toLowerCase() === "copy") {
-              const active = document.activeElement;
-              const value = active && "value" in active
-                ? active.value
-                : String(window.getSelection?.() || "");
-              if (intercept(value)) return false;
-            }
-          } catch { /* fall through to native */ }
-          return nativeExec(command, ...rest);
+    const documentProto = typeof Document === "function"
+      ? Document.prototype
+      : Object.getPrototypeOf(document);
+    lockMethod(documentProto, "execCommand", (native) => function execCommand(command, ...rest) {
+      try {
+        if (String(command).toLowerCase() === "copy") {
+          const active = this.activeElement;
+          const value = active && "value" in active
+            ? active.value
+            : String(window.getSelection?.() || "");
+          if (intercept(value)) return false;
         }
-      });
-    }
+      } catch { /* fall through to native */ }
+      return native.call(this, command, ...rest);
+    });
   } catch { /* leave execCommand alone if it cannot be wrapped */ }
 })();

@@ -232,6 +232,36 @@ const check = (name, condition, detail = "") => {
       /warn:[\s\S]*?copied a system command to your clipboard/.test(messages[1]));
   }
   check("banner is selected by verdict", /MESSAGES\[verdict\]/.test(guardSrc));
+
+  // --- bypass resistance (security review follow-up) ------------------------
+  // Each check below corresponds to a way a page could have disarmed the guard.
+  check("wrappers are locked non-configurable and non-writable",
+    /configurable: false, enumerable: false, writable: false/.test(guardSrc));
+  check("clipboard is patched on the prototype, not the instance",
+    /Object\.getPrototypeOf\(navigator\.clipboard\)/.test(guardSrc) &&
+    !/Object\.defineProperty\(clipboard,/.test(guardSrc));
+  check("execCommand is patched on Document.prototype",
+    /Document\.prototype/.test(guardSrc) &&
+    !/Object\.defineProperty\(document, "execCommand"/.test(guardSrc));
+  check("untrusted synthetic clicks cannot forge a user gesture",
+    /if \(!event\.isTrusted\) return;/.test(guardSrc));
+  check("navigator.userActivation is reported but not used as a veto",
+    /navigator\.userActivation/.test(guardSrc) &&
+    /browserActivation: browserSaysActivated\(\)/.test(guardSrc) &&
+    !/activated !== false/.test(guardSrc));
+  check("clipboard writes are caught at DataTransfer.setData, not only on copy",
+    /DataTransfer\.prototype, "setData"/.test(guardSrc));
+  check("native functions are reached through a closure, not a public property",
+    /native\.call\(this/.test(guardSrc));
+}
+
+// --- MAIN-world guards reach page-created frames -----------------------------
+{
+  const bg = await readFile(new URL("../background.js", import.meta.url), "utf8");
+  const mainWorld = (bg.match(/world: "MAIN"/g) || []).length;
+  const fallback = (bg.match(/matchOriginAsFallback: true/g) || []).length;
+  check("every MAIN-world registration sets matchOriginAsFallback",
+    mainWorld > 0 && fallback === mainWorld, `MAIN=${mainWorld} fallback=${fallback}`);
 }
 
 // --- 4. guard is registered and switchable ----------------------------------
@@ -242,7 +272,7 @@ const check = (name, condition, detail = "") => {
   check("guard registers clickfix-guard.js", /js: \["clickfix-guard\.js"\]/.test(bg));
   check("guard registration is gated on the setting", /if \(settings\.clickfixGuard\)/.test(bg));
   check("guard runs in the MAIN world at document_start",
-    /advanced-blocker-clickfix-guard[\s\S]{0,600}world: "MAIN"/.test(bg));
+    /advanced-blocker-clickfix-guard[\s\S]{0,1200}world: "MAIN"/.test(bg));
   check("guard sync participates in the startup orchestration",
     (bg.match(/syncClickfixGuard\(\)/g) || []).length >= 3);
   check("dead PUP feed is gone", !/pup-filter-ag\.txt/.test(bg));

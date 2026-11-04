@@ -532,6 +532,11 @@ async function syncPrivacyContentScriptCore() {
         matches: ["http://*/*", "https://*/*"],
         js: ["privacy-signals.js"],
         allFrames: true,
+        // about:blank / about:srcdoc / blob: frames do not match http(s) patterns,
+        // so without this a page can host its clipboard write or window.open in an
+        // iframe it creates itself and the MAIN-world guards never load there.
+        // Chrome 119+ in registerContentScripts; this extension requires 121.
+        matchOriginAsFallback: true,
         runAt: "document_start",
         world: "MAIN",
         persistAcrossSessions: true
@@ -559,6 +564,11 @@ async function syncScriptletsCore() {
         matches: ["http://*/*", "https://*/*"],
         js: ["scriptlets.js"],
         allFrames: true,
+        // about:blank / about:srcdoc / blob: frames do not match http(s) patterns,
+        // so without this a page can host its clipboard write or window.open in an
+        // iframe it creates itself and the MAIN-world guards never load there.
+        // Chrome 119+ in registerContentScripts; this extension requires 121.
+        matchOriginAsFallback: true,
         runAt: "document_start",
         world: "MAIN",
         persistAcrossSessions: true
@@ -586,6 +596,11 @@ async function syncPopupGuardCore() {
         matches: ["http://*/*", "https://*/*"],
         js: ["popup-guard.js"],
         allFrames: true,
+        // about:blank / about:srcdoc / blob: frames do not match http(s) patterns,
+        // so without this a page can host its clipboard write or window.open in an
+        // iframe it creates itself and the MAIN-world guards never load there.
+        // Chrome 119+ in registerContentScripts; this extension requires 121.
+        matchOriginAsFallback: true,
         runAt: "document_start",
         world: "MAIN",
         persistAcrossSessions: true
@@ -613,6 +628,11 @@ async function syncClickfixGuardCore() {
         matches: ["http://*/*", "https://*/*"],
         js: ["clickfix-guard.js"],
         allFrames: true,
+        // about:blank / about:srcdoc / blob: frames do not match http(s) patterns,
+        // so without this a page can host its clipboard write or window.open in an
+        // iframe it creates itself and the MAIN-world guards never load there.
+        // Chrome 119+ in registerContentScripts; this extension requires 121.
+        matchOriginAsFallback: true,
         runAt: "document_start",
         world: "MAIN",
         persistAcrossSessions: true
