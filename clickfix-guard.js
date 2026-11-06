@@ -347,6 +347,37 @@
   // tampering with these prototypes cannot change how the guard reads data.
   const nativeIncludes = Array.prototype.includes;
   const nativeArrayFrom = Array.from;
+
+  // Give a snapshot its OWN non-writable @@iterator that walks indices.
+  //
+  // Handing a plain Array to the native is not enough. WebIDL's
+  // sequence<ClipboardItem> conversion does GetMethod(value, @@iterator), which
+  // on an ordinary array resolves through Array.prototype[Symbol.iterator] - and
+  // the page can replace that with a stateful function, so the classifier's pass
+  // and the native's pass see different values (verified: the guard classifies
+  // the first yield while the native iterates the second). An own,
+  // non-configurable, non-writable iterator is found before the prototype, so the
+  // native can only ever walk the entries we inspected. Hand-rolled rather than a
+  // generator, to avoid depending on %GeneratorPrototype% being untampered.
+  const sealSequence = (arr) => {
+    try {
+      Object.defineProperty(arr, Symbol.iterator, {
+        configurable: false, enumerable: false, writable: false,
+        value: function () {
+          let i = 0;
+          return {
+            next: () => {
+              if (i >= arr.length) return { value: undefined, done: true };
+              const value = arr[i];
+              i += 1;
+              return { value, done: false };
+            }
+          };
+        }
+      });
+    } catch { /* non-essential: the classifier still inspected this snapshot */ }
+    return arr;
+  };
   const nativeBlobText = typeof Blob === "function" ? Blob.prototype.text : null;
   const nativeItemGetType = typeof ClipboardItem === "function"
     ? ClipboardItem.prototype.getType : null;
@@ -413,7 +444,7 @@
         // taken with a captured Array.from and walked by index, so neither a
         // replaced Array.prototype[Symbol.iterator] nor a re-iterating source can
         // make the native see anything the classifier did not.
-        const list = nativeArrayFrom(items || []);
+        const list = sealSequence(nativeArrayFrom(items || []));
         let anomalous = false;
         for (let i = 0; i < list.length; i += 1) {
           const item = list[i];
