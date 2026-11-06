@@ -91,6 +91,18 @@
   const nativeString = String;
   const nativePromiseResolve = Promise.resolve.bind(Promise);
   const nativeIsArray = Array.isArray;
+  const NativePromise = Promise;
+  const nativeThen = Promise.prototype.then;
+
+  // `await p` is NOT safe on a page-reachable promise. Per spec it performs
+  // PromiseResolve(%Promise%, p), which does Get(p, "constructor") and only uses
+  // p's internal slots when that is the intrinsic %Promise%. A page that replaces
+  // Promise.prototype.constructor makes the check fail, so p is treated as a
+  // thenable and Get(p, "then") - also page-replaceable - decides the resolution
+  // value. The classifier would then inspect whatever the page chose while the
+  // native call writes the item's real bytes. Every promise the guard consumes is
+  // therefore driven through the captured `then` with explicit callbacks, and
+  // composed inside promises built from the captured constructor.
 
   // Coerce to a primitive string using the captured String, and refuse anything
   // that does not come back as one. A value that will not reduce to a primitive
@@ -482,7 +494,7 @@
         return nativeApply(native, this, [value]);
       });
 
-      lockMethod(clipboardProto, "write", (native) => async function write(items) {
+      lockMethod(clipboardProto, "write", (native) => function write(items) {
         // Read each item through the natives captured at startup, never through
         // its own properties. Platform objects are extensible, so a page can
         // shadow the `types` getter or `getType` with an own property that
@@ -511,31 +523,87 @@
           showWarning("block");
           return nativePromiseResolve();
         }
-        let anomalous = false;
-        for (let i = 0; i < list.length; i += 1) {
-          const item = list[i];
-          let types;
-          try {
-            types = nativeItemTypes ? nativeApply(nativeItemTypes, item, []) : item?.types;
-          } catch { anomalous = true; continue; }
-          try {
-            if (!types || !nativeApply(nativeIncludes, types, ["text/plain"])) continue;
-            const blob = nativeItemGetType
-              ? await nativeApply(nativeItemGetType, item, ["text/plain"])
-              : await item.getType("text/plain");
-            const text = nativeBlobText ? await nativeApply(nativeBlobText, blob, []) : await blob.text();
-            const asString = toPrimitiveString(text);
-            if (asString === null || intercept(asString)) return;
-          } catch { anomalous = true; }
-        }
-        // An item we could not read is not proof of innocence. Say so rather than
-        // passing it through silently -- but warn instead of blocking, because a
-        // legitimate non-text item (an image from a "copy image" button) must
-        // still reach the clipboard.
-        if (anomalous) {
-          report("warn", describe("[unreadable clipboard item]"));
-        }
-        return nativeApply(native, this, [list]);
+
+        // Deliberately NOT an async function: `await` on the promises returned by
+        // getType()/text() is page-interceptable (see the capture block). The walk
+        // is driven by captured `then` callbacks instead.
+        const self = this;
+        return new NativePromise((resolve, reject) => {
+          let anomalous = false;
+
+          const forward = () => {
+            // An item we could not read is not proof of innocence. Say so rather
+            // than passing it through silently -- but warn instead of blocking,
+            // because a legitimate non-text item (an image from a "copy image"
+            // button) must still reach the clipboard.
+            if (anomalous) report("warn", describe("[unreadable clipboard item]"));
+            try {
+              nativeApply(nativeThen, nativeApply(native, self, [list]), [resolve, reject]);
+            } catch (error) { reject(error); }
+          };
+
+          // Separate "could not read this item" from "the environment lied to
+          // us". Promise.prototype.then performs SpeciesConstructor(p, %Promise%),
+          // which reads the page-replaceable Promise.prototype.constructor, so a
+          // hostile constructor can make an intrinsic promise's `then` throw
+          // synchronously. Routing that through the unreadable-item path would
+          // warn and forward -- turning a block into a pass, which is the whole
+          // bypass. A captured native throwing on an intrinsic promise is never
+          // honest, so fail closed instead.
+          const tamper = () => {
+            report("block", describe("[clipboard promise chain could not be secured]"));
+            showWarning("block");
+            resolve(undefined);
+          };
+
+          const step = (i) => {
+            if (i >= list.length) return forward();
+            const item = list[i];
+            const skip = () => step(i + 1);
+            const fail = () => { anomalous = true; skip(); };
+
+            let types;
+            try {
+              types = nativeItemTypes ? nativeApply(nativeItemTypes, item, []) : item?.types;
+            } catch { return fail(); }
+
+            let hasText = false;
+            try {
+              hasText = Boolean(types) && nativeApply(nativeIncludes, types, ["text/plain"]);
+            } catch { return fail(); }
+            if (!hasText) return skip();
+
+            let blobPromise;
+            try {
+              blobPromise = nativeItemGetType
+                ? nativeApply(nativeItemGetType, item, ["text/plain"])
+                : item.getType("text/plain");
+            } catch { return fail(); }
+
+            try {
+              nativeApply(nativeThen, blobPromise, [(blob) => {
+                let textPromise;
+                try {
+                  textPromise = nativeBlobText
+                    ? nativeApply(nativeBlobText, blob, [])
+                    : blob.text();
+                } catch { return fail(); }
+                try {
+                  nativeApply(nativeThen, textPromise, [(text) => {
+                    const asString = toPrimitiveString(text);
+                    if (asString === null) return fail();
+                    // Blocked: never reach the native, and resolve so callers
+                    // chaining .then() are not left pending.
+                    if (intercept(asString)) return resolve(undefined);
+                    return skip();
+                  }, fail]);
+                } catch { return tamper(); }
+              }, fail]);
+            } catch { return tamper(); }
+          };
+
+          step(0);
+        });
       });
     }
   } catch { /* clipboard unavailable (insecure context): nothing to guard */ }
@@ -598,16 +666,28 @@
       ? Document.prototype
       : nativeGetPrototypeOf(document);
     lockMethod(documentProto, "execCommand", (native) => function execCommand(command, ...rest) {
+      // Coerce ONCE and forward the coerced value. Classifying
+      // toPrimitiveString(command) and then forwarding the original `command` was
+      // the same mistake already fixed in writeText and setData: a mutating
+      // toString lets the guard read "notcopy" and skip classification while the
+      // native reads "copy" and performs the copy unchecked.
+      const cmd = toPrimitiveString(command);
+      if (cmd === null) return false;
       try {
-        if ((toPrimitiveString(command) || "").toLowerCase() === "copy") {
+        if (cmd.toLowerCase() === "copy") {
           const active = this.activeElement;
-          const value = active && "value" in active
+          const raw = active && "value" in active
             ? active.value
-            : (toPrimitiveString(window.getSelection?.() || "") || "");
-          if (intercept(value)) return false;
+            : window.getSelection?.() || "";
+          const asString = toPrimitiveString(raw);
+          if (asString === null || intercept(asString)) return false;
         }
       } catch { /* fall through to native */ }
-      return nativeApply(native, this, [command, ...rest]);
+      // Build the argument list by index: a spread would use the array iterator,
+      // which is page-replaceable.
+      const args = [cmd];
+      for (let i = 0; i < rest.length; i += 1) args[i + 1] = rest[i];
+      return nativeApply(native, this, args);
     });
   } catch { /* leave execCommand alone if it cannot be wrapped */ }
 })();
