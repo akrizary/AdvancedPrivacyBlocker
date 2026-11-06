@@ -60,6 +60,49 @@
   if (window.__abClickfixGuard) return;
   window.__abClickfixGuard = true;
 
+  // --- captured intrinsics -------------------------------------------------
+  // Everything below runs at document_start, before any page script, and every
+  // intrinsic the guard depends on is captured here. Nothing after this point
+  // may look an intrinsic up by name at call time.
+  //
+  // This is the generalisation of four separate bypasses found in this file: the
+  // guard's own tooling is page-controlled unless it is captured first. Concrete
+  // instances, all of which defeat the whole guard rather than one path:
+  //
+  //   Function.prototype.call - every wrapper forwards with native.call(this, v).
+  //     Replacing it routes all of them through page code.
+  //   String - `const value = String(text)` is the single-coercion fix; a replaced
+  //     String can return an OBJECT, which the classifier stringifies to something
+  //     benign while the WebIDL binding coerces it again to the payload.
+  //   Object.defineProperty - sealSequence uses it to lock an iterator. A no-op
+  //     replacement does not throw, so the seal silently fails and the array is
+  //     forwarded with a prototype-resolved iterator.
+  //   Promise.resolve - returned to callers on a block.
+  //
+  // Symbol.iterator deliberately is NOT captured: it is defined as
+  // { writable: false, enumerable: false, configurable: false } on Symbol, so it
+  // cannot be replaced and capturing it would only suggest otherwise.
+  const nativeApply = Reflect.apply;
+  const nativeDefineProperty = Object.defineProperty;
+  const nativeGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const nativeGetPrototypeOf = Object.getPrototypeOf;
+  const nativeFreeze = Object.freeze;
+  const nativeKeys = Object.keys;
+  const nativeString = String;
+  const nativePromiseResolve = Promise.resolve.bind(Promise);
+  const nativeIsArray = Array.isArray;
+
+  // Coerce to a primitive string using the captured String, and refuse anything
+  // that does not come back as one. A value that will not reduce to a primitive
+  // is exactly the shape used to smuggle a second coercion past the classifier,
+  // so it is reported as a string that cannot be trusted rather than forwarded.
+  const toPrimitiveString = (value) => {
+    let out;
+    try { out = nativeString(value == null ? "" : value); }
+    catch { return null; }
+    return typeof out === "string" ? out : null;
+  };
+
   // --- payload shape -------------------------------------------------------
   // Tokens that make a string an OS command rather than text a page would
   // legitimately hand you. Grouped so the policy function can weigh them.
@@ -109,7 +152,13 @@
 
   // A structured description of the payload, so policy reads as policy.
   function describe(text) {
-    const value = String(text == null ? "" : text);
+    const value = toPrimitiveString(text);
+    if (value === null) {
+      // Unreducible to a primitive: treat as maximally suspicious rather than
+      // letting it through unclassified.
+      return { text: "[unreducible value]", length: 0, lines: 1,
+               execution: 1, downloadExec: 1, stealth: 1, lure: 1 };
+    }
     return {
       text: value,
       length: value.length,
@@ -234,8 +283,8 @@
   // the console when tuning a site. Read-only surface; no page input reaches the
   // extension through it.
   try {
-    Object.defineProperty(window, "__abClickfixGuardInternals", {
-      configurable: true, enumerable: false, value: Object.freeze({ describe, decide })
+    nativeDefineProperty(window, "__abClickfixGuardInternals", {
+      configurable: true, enumerable: false, value: nativeFreeze({ describe, decide })
     });
   } catch { /* non-essential */ }
 
@@ -359,9 +408,14 @@
   // non-configurable, non-writable iterator is found before the prototype, so the
   // native can only ever walk the entries we inspected. Hand-rolled rather than a
   // generator, to avoid depending on %GeneratorPrototype% being untampered.
+  // Returns the sealed array, or null if the seal could not be VERIFIED. A
+  // replaced Object.defineProperty that silently does nothing would not throw, so
+  // trusting the try/catch alone would fail open: the caller forwards an array
+  // whose iterator still resolves through the (page-controlled) prototype. The
+  // descriptor is therefore read back through a captured accessor and checked.
   const sealSequence = (arr) => {
     try {
-      Object.defineProperty(arr, Symbol.iterator, {
+      nativeDefineProperty(arr, Symbol.iterator, {
         configurable: false, enumerable: false, writable: false,
         value: function () {
           let i = 0;
@@ -375,7 +429,11 @@
           };
         }
       });
-    } catch { /* non-essential: the classifier still inspected this snapshot */ }
+    } catch { return null; }
+    try {
+      const d = nativeGetOwnPropertyDescriptor(arr, Symbol.iterator);
+      if (!d || typeof d.value !== "function" || d.writable || d.configurable) return null;
+    } catch { return null; }
     return arr;
   };
   const nativeBlobText = typeof Blob === "function" ? Blob.prototype.text : null;
@@ -384,7 +442,7 @@
   const nativeItemTypes = (() => {
     try {
       if (typeof ClipboardItem !== "function") return null;
-      return Object.getOwnPropertyDescriptor(ClipboardItem.prototype, "types")?.get || null;
+      return nativeGetOwnPropertyDescriptor(ClipboardItem.prototype, "types")?.get || null;
     } catch { return null; }
   })();
 
@@ -392,7 +450,7 @@
     try {
       const native = holder?.[name];
       if (typeof native !== "function") return false;
-      Object.defineProperty(holder, name, {
+      nativeDefineProperty(holder, name, {
         configurable: false, enumerable: false, writable: false,
         value: build(native)
       });
@@ -403,7 +461,7 @@
   // 1 & 2. Clipboard.prototype.writeText / .write
   try {
     const clipboardProto = navigator.clipboard
-      ? Object.getPrototypeOf(navigator.clipboard)
+      ? nativeGetPrototypeOf(navigator.clipboard)
       : (typeof Clipboard === "function" ? Clipboard.prototype : null);
 
     if (clipboardProto) {
@@ -419,9 +477,9 @@
         //
         // would be classified as "hello" and written as the payload.
         // `this` keeps the call bound to whichever Clipboard instance was used.
-        const value = String(text);
-        if (intercept(value)) return Promise.resolve(); // resolve: callers chain .then()
-        return native.call(this, value);
+        const value = toPrimitiveString(text);
+        if (value === null || intercept(value)) return nativePromiseResolve();
+        return nativeApply(native, this, [value]);
       });
 
       lockMethod(clipboardProto, "write", (native) => async function write(items) {
@@ -445,20 +503,29 @@
         // replaced Array.prototype[Symbol.iterator] nor a re-iterating source can
         // make the native see anything the classifier did not.
         const list = sealSequence(nativeArrayFrom(items || []));
+        // Fail CLOSED. Sealing only fails when the environment has been tampered
+        // with, which is itself hostile, so there is no legitimate copy to
+        // protect here -- unlike an unreadable item, which can be a real image.
+        if (list === null || !nativeIsArray(list)) {
+          report("block", describe("[clipboard sequence could not be secured]"));
+          showWarning("block");
+          return nativePromiseResolve();
+        }
         let anomalous = false;
         for (let i = 0; i < list.length; i += 1) {
           const item = list[i];
           let types;
           try {
-            types = nativeItemTypes ? nativeItemTypes.call(item) : item?.types;
+            types = nativeItemTypes ? nativeApply(nativeItemTypes, item, []) : item?.types;
           } catch { anomalous = true; continue; }
           try {
-            if (!types || !nativeIncludes.call(types, "text/plain")) continue;
+            if (!types || !nativeApply(nativeIncludes, types, ["text/plain"])) continue;
             const blob = nativeItemGetType
-              ? await nativeItemGetType.call(item, "text/plain")
+              ? await nativeApply(nativeItemGetType, item, ["text/plain"])
               : await item.getType("text/plain");
-            const text = nativeBlobText ? await nativeBlobText.call(blob) : await blob.text();
-            if (intercept(String(text))) return;
+            const text = nativeBlobText ? await nativeApply(nativeBlobText, blob, []) : await blob.text();
+            const asString = toPrimitiveString(text);
+            if (asString === null || intercept(asString)) return;
           } catch { anomalous = true; }
         }
         // An item we could not read is not proof of innocence. Say so rather than
@@ -468,7 +535,7 @@
         if (anomalous) {
           report("warn", describe("[unreadable clipboard item]"));
         }
-        return native.call(this, list);
+        return nativeApply(native, this, [list]);
       });
     }
   } catch { /* clipboard unavailable (insecure context): nothing to guard */ }
@@ -488,8 +555,9 @@
       lockMethod(DataTransfer.prototype, "setData", (native) => function setData(format, data) {
         // Coerce both arguments once, for the same time-of-check/time-of-use
         // reason as writeText above, and pass the primitives on.
-        const fmt = String(format);
-        const value = String(data);
+        const fmt = toPrimitiveString(format);
+        const value = toPrimitiveString(data);
+        if (fmt === null || value === null) return undefined; // refuse unreducible input
         // No format allowlist. Matching only `text/plain`/`text` meant reasoning
         // about how the browser normalises a format string ("TEXT/Plain", a
         // trailing parameter, surrounding whitespace, the text -> text/plain and
@@ -501,7 +569,7 @@
         try {
           if (intercept(value)) return undefined; // drop: clipboard keeps its old contents
         } catch { /* fall through to native */ }
-        return native.call(this, fmt, value);
+        return nativeApply(native, this, [fmt, value]);
       });
     }
   } catch { /* DataTransfer unavailable: the copy listener below still applies */ }
@@ -512,7 +580,7 @@
     try {
       const injected = event.clipboardData?.getData?.("text/plain");
       if (!injected) return;
-      const selected = String(window.getSelection?.() || "");
+      const selected = toPrimitiveString(window.getSelection?.() || "") || "";
       // Only inspect writes that do NOT match the selection: an unmodified copy
       // of what the user highlighted is their own action, whatever it says.
       if (selected && injected.trim() === selected.trim()) return;
@@ -528,18 +596,18 @@
   try {
     const documentProto = typeof Document === "function"
       ? Document.prototype
-      : Object.getPrototypeOf(document);
+      : nativeGetPrototypeOf(document);
     lockMethod(documentProto, "execCommand", (native) => function execCommand(command, ...rest) {
       try {
-        if (String(command).toLowerCase() === "copy") {
+        if ((toPrimitiveString(command) || "").toLowerCase() === "copy") {
           const active = this.activeElement;
           const value = active && "value" in active
             ? active.value
-            : String(window.getSelection?.() || "");
+            : (toPrimitiveString(window.getSelection?.() || "") || "");
           if (intercept(value)) return false;
         }
       } catch { /* fall through to native */ }
-      return native.call(this, command, ...rest);
+      return nativeApply(native, this, [command, ...rest]);
     });
   } catch { /* leave execCommand alone if it cannot be wrapped */ }
 })();
