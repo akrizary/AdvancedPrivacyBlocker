@@ -9,6 +9,35 @@ Generated: 2026-07-25
 - `MOCK_RUNTIME_VALIDATION_VERIFIED`: service-worker behavior passed against a mocked Chrome API runtime.
 - `BROWSER_RUNTIME_BLOCKED_BY_ENVIRONMENT_POLICY`: installed Chromium is governed by `ExtensionInstallBlocklist: ["*"]` and `URLBlocklist: ["*"]`.
 - `BROWSER_RUNTIME_UNVERIFIED`: no claim is made that representative websites were exercised in an unmanaged browser.
+- `CLICKFIX_GUARD_PAGE_RUNTIME_VERIFIED`: the ClickFix guard's page-side behaviour was
+  exercised in a real Chromium page, served over `http://localhost` in the Claude
+  desktop app's built-in browser pane, by `test/browser/live-check.html`: 32/32
+  checks, with a negative control (reverting one fix produced exactly one
+  failure). This is a narrow claim and does NOT supersede the two entries above.
+  The guard was loaded as an ordinary page script, NOT as an installed
+  extension's MAIN-world content script, so nothing here exercises
+  `chrome.scripting.registerContentScripts`, the service worker, or any DNR rule.
+
+## ClickFix guard: assumptions settled in Chromium
+
+The Node suite runs the guard against hand-written platform stubs, so three
+assumptions it depends on were previously asserted rather than observed. All
+three were confirmed in a real Chromium page:
+
+| Assumption | Observed |
+| --- | --- |
+| `lockMethod` can define a wrapper with `configurable: false` on a platform prototype | all four wrappers installed `configurable=false writable=false`; `delete` refused; redefinition threw `TypeError` |
+| WebIDL `sequence<T>` conversion resolves an own `@@iterator` before the prototype's | confirmed via `URLSearchParams(sequence<sequence<USVString>>)` with `Array.prototype[Symbol.iterator]` replaced |
+| a platform `value` getter throws on a receiver without the internal slot | threw `TypeError`; the captured getter read the internal slot while `.value` by name returned the page's shadow |
+
+The first mattered most: had `Object.defineProperty` been rejected on
+`Clipboard.prototype`, `lockMethod`'s `catch` would have swallowed it and every
+wrapper in the file would be silently absent, which no stub-based test can see.
+
+Re-run with a static server over the extension directory and open
+`test/browser/live-check.html`; a user gesture is required, so click the button
+rather than invoking the suite programmatically. Note that the benign-text check
+writes to the real clipboard.
 
 ## Rule inventory
 
@@ -79,7 +108,12 @@ of the 14 upstream sources and their licences.
 
 ## Remaining release gates
 
-1. Load unpacked in an unmanaged Chromium 121+ profile.
+1. Load unpacked in an unmanaged Chromium 121+ profile. Still outstanding for the
+   ClickFix guard specifically: whether `registerContentScripts` accepts
+   `matchOriginAsFallback` on the target Chromium (if it throws, the surrounding
+   `catch` disables all four MAIN-world registrations silently), and whether
+   locking `Clipboard.prototype` breaks real sites. Neither is reachable from a
+   page harness.
 2. Exercise representative sites for ads, analytics, consent CMPs, search redirects, zapping and timed trust.
 3. Use a harmless controlled test URL for malware-rule verification; do not browse live malicious samples.
 4. Test breakage-sensitive flows: login, CAPTCHA, embedded video, checkout and SSO.

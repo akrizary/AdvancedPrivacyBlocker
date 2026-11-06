@@ -93,7 +93,19 @@
   const nativeIsArray = Array.isArray;
   const NativePromise = Promise;
   const nativeThen = Promise.prototype.then;
-  const nativeRegExpTest = RegExp.prototype.test;
+  // exec, NOT test. RegExp.prototype.test(S) calls RegExpExec(R, S), whose first
+  // step is Get(R, "exec") -- so a captured `test` still dispatches through the
+  // page-replaceable exec and RegExp.prototype.exec = () => null silently makes
+  // every pattern miss. Round 7 captured `test` and reported the hole closed; it
+  // was not. Verified: with exec replaced, the captured test returned false and
+  // the native received the full payload. Calling the captured exec directly
+  // skips the Get entirely.
+  //
+  // Nothing else in that path is page-reachable: the pattern objects live in this
+  // closure and are never exposed (__abClickfixGuardInternals publishes only
+  // describe and decide), and none of them is global or sticky, so lastIndex is
+  // reset before matching and cannot be used to steer a result.
+  const nativeRegExpExec = RegExp.prototype.exec;
   const nativeToLowerCase = String.prototype.toLowerCase;
   const nativeSplit = String.prototype.split;
   const nativeStringSlice = String.prototype.slice;
@@ -199,11 +211,12 @@
   ];
 
   // Walk by index with a captured RegExp.prototype.test. `patterns.reduce(...)`
-  // and `re.test(...)` each resolve through a page-replaceable prototype, and
-  // either one zeroes every token count on its own:
+  // and `re.test(...)` each resolve through a page-replaceable prototype, and any
+  // one of these zeroes every token count on its own:
   //
   //   Array.prototype.reduce = () => 0
   //   RegExp.prototype.test = () => false
+  //   RegExp.prototype.exec = () => null      (reaches a CAPTURED test too)
   //
   // With no command tokens counted, decide() returns "allow", so this was a
   // one-line total bypass of all four hook paths, not of one of them. Verified
@@ -214,7 +227,7 @@
       let hit;
       // A pattern that will not run is treated as a match. Failing closed here
       // costs a false positive; failing open costs the whole guard.
-      try { hit = nativeApply(nativeRegExpTest, patterns[i], [text]) === true; }
+      try { hit = nativeApply(nativeRegExpExec, patterns[i], [text]) !== null; }
       catch { hit = true; }
       if (hit) n += 1;
     }
@@ -247,10 +260,15 @@
   };
 
   // The selection the browser would actually copy, read through captured natives.
-  const readSelection = () => {
+  // Takes the document to read from. execCommand can be invoked with a `this`
+  // that is NOT the guard's own document (another frame's), and reading
+  // activeElement from that document while reading the selection from ours meant
+  // classifying one document's text and copying another's. Verified: a foreign
+  // document with no activeElement classified the empty string and forwarded.
+  const readSelection = (doc) => {
     try {
       let sel = null;
-      if (nativeDocGetSelection) sel = nativeApply(nativeDocGetSelection, document, []);
+      if (nativeDocGetSelection) sel = nativeApply(nativeDocGetSelection, doc || document, []);
       else if (nativeWinGetSelection) sel = nativeApply(nativeWinGetSelection, window, []);
       else if (typeof window.getSelection === "function") sel = window.getSelection();
       if (sel == null) return "";
@@ -776,7 +794,7 @@
         dt && nativeDTGetData ? nativeApply(nativeDTGetData, dt, ["text/plain"]) : dt?.getData?.("text/plain")
       ) || "";
       if (!injected) return;
-      const selected = readSelection();
+      const selected = readSelection(document);
       // Only inspect writes that do NOT match the selection: an unmodified copy
       // of what the user highlighted is their own action, whatever it says.
       // Captured trim, so String.prototype.trim cannot be replaced to make any
@@ -801,25 +819,40 @@
   // value. That is deliberate: the value is a superset of the selection, so a
   // partial selection can only ever be judged more strictly, never less.
   const readCopySource = (doc) => {
-    const active = nativeActiveElement
-      ? nativeApply(nativeActiveElement, doc, [])
-      : doc.activeElement;
+    // Always classify the SELECTION of the document the command runs on, and add
+    // the focused field's value when there is one. Either being command-shaped is
+    // enough to refuse, so neither a field whose selection is elsewhere nor a
+    // selection outside any field can slip through.
+    const parts = [readSelection(doc)];
+    let active = null;
+    try {
+      active = nativeActiveElement ? nativeApply(nativeActiveElement, doc, []) : doc.activeElement;
+    } catch { return null; } // unreadable focus: let the caller fail closed
     if (active != null) {
+      let got = false;
       const getters = [nativeInputValue, nativeTextAreaValue];
       for (let i = 0; i < getters.length; i += 1) {
         if (!getters[i]) continue;
         let value;
         try { value = nativeApply(getters[i], active, []); }
-        catch { continue; } // not this element type
-        return toPrimitiveString(value);
+        catch { continue; } // the accessor rejected the receiver: wrong type
+        const asString = toPrimitiveString(value);
+        if (asString === null) return null;
+        parts[parts.length] = asString;
+        got = true;
+        break;
       }
-      // No captured value getter for this element type. Fall back to the own
-      // property, which is what a non-browser host (or a very old engine) gives
-      // us. This path is page-shadowable by construction; the captured getters
-      // above are the ones that matter in Chromium.
-      if ("value" in active) return toPrimitiveString(active.value);
+      // Read `value` by NAME only where there was never a native to capture.
+      // When the captured getters exist and merely rejected this receiver, the
+      // element is not a text field and its `value` is a page-defined property,
+      // so consulting it would reintroduce exactly the shadowing this fixes.
+      if (!got && !nativeInputValue && !nativeTextAreaValue && "value" in active) {
+        const asString = toPrimitiveString(active.value);
+        if (asString === null) return null;
+        parts[parts.length] = asString;
+      }
     }
-    return readSelection();
+    return nativeApply(nativeArrayJoin, parts, ["\n"]);
   };
 
   // 4. document.execCommand("copy") against a page-controlled selection.
