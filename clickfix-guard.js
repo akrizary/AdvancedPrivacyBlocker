@@ -93,6 +93,44 @@
   const nativeIsArray = Array.isArray;
   const NativePromise = Promise;
   const nativeThen = Promise.prototype.then;
+  const nativeRegExpTest = RegExp.prototype.test;
+  const nativeToLowerCase = String.prototype.toLowerCase;
+  const nativeSplit = String.prototype.split;
+  const nativeStringSlice = String.prototype.slice;
+  const nativeTrim = String.prototype.trim;
+  const nativeArrayJoin = Array.prototype.join;
+  const nativeIncludes = Array.prototype.includes;
+  const nativeArrayFrom = Array.from;
+  const nativeDateNow = Date.now;
+  const NativeCustomEvent = typeof CustomEvent === "function" ? CustomEvent : null;
+
+  // DOM accessors the guard reads page-reachable data through. Reading them by
+  // property name classifies what the page offers rather than what the browser
+  // will copy: an own `value` defined on a focused input shadows the real getter
+  // for us while the browser still copies the selection from internal slots.
+  const grabGetter = (holder, name) => {
+    try { return holder ? nativeGetOwnPropertyDescriptor(holder, name)?.get || null : null; }
+    catch { return null; }
+  };
+  const grabMethod = (holder, name) => {
+    try {
+      const fn = holder ? holder[name] : null;
+      return typeof fn === "function" ? fn : null;
+    } catch { return null; }
+  };
+  const protoOf = (name) => {
+    try { return typeof window[name] === "function" ? window[name].prototype : null; }
+    catch { return null; }
+  };
+  const nativeActiveElement = grabGetter(protoOf("Document"), "activeElement");
+  const nativeDocGetSelection = grabMethod(protoOf("Document"), "getSelection");
+  const nativeWinGetSelection = grabMethod(window, "getSelection");
+  const nativeSelectionToString = grabMethod(protoOf("Selection"), "toString");
+  const nativeInputValue = grabGetter(protoOf("HTMLInputElement"), "value");
+  const nativeTextAreaValue = grabGetter(protoOf("HTMLTextAreaElement"), "value");
+  const nativeGetAttribute = grabMethod(protoOf("Element"), "getAttribute");
+  const nativeEventClipboardData = grabGetter(protoOf("ClipboardEvent"), "clipboardData");
+  const nativeDTGetData = grabMethod(protoOf("DataTransfer"), "getData");
 
   // `await p` is NOT safe on a page-reachable promise. Per spec it performs
   // PromiseResolve(%Promise%, p), which does Get(p, "constructor") and only uses
@@ -160,7 +198,66 @@
     /\b(verification|session|ray)\s*id\s*[:=]/i
   ];
 
-  const countMatches = (text, patterns) => patterns.reduce((n, re) => n + (re.test(text) ? 1 : 0), 0);
+  // Walk by index with a captured RegExp.prototype.test. `patterns.reduce(...)`
+  // and `re.test(...)` each resolve through a page-replaceable prototype, and
+  // either one zeroes every token count on its own:
+  //
+  //   Array.prototype.reduce = () => 0
+  //   RegExp.prototype.test = () => false
+  //
+  // With no command tokens counted, decide() returns "allow", so this was a
+  // one-line total bypass of all four hook paths, not of one of them. Verified
+  // against the real wrappers: the native received the full PowerShell payload.
+  const countMatches = (text, patterns) => {
+    let n = 0;
+    for (let i = 0; i < patterns.length; i += 1) {
+      let hit;
+      // A pattern that will not run is treated as a match. Failing closed here
+      // costs a false positive; failing open costs the whole guard.
+      try { hit = nativeApply(nativeRegExpTest, patterns[i], [text]) === true; }
+      catch { hit = true; }
+      if (hit) n += 1;
+    }
+    return n;
+  };
+
+  const lowered = (value) => {
+    try {
+      const out = nativeApply(nativeToLowerCase, value, []);
+      return typeof out === "string" ? out : value;
+    } catch { return value; }
+  };
+  const trimmed = (value) => {
+    try {
+      const out = nativeApply(nativeTrim, value, []);
+      return typeof out === "string" ? out : value;
+    } catch { return value; }
+  };
+  const clipped = (value, end) => {
+    try {
+      const out = nativeApply(nativeStringSlice, value, [0, end]);
+      return typeof out === "string" ? out : "";
+    } catch { return ""; }
+  };
+  const countLines = (value) => {
+    try {
+      const parts = nativeApply(nativeSplit, value, ["\n"]);
+      return nativeIsArray(parts) ? parts.length : 1;
+    } catch { return 1; }
+  };
+
+  // The selection the browser would actually copy, read through captured natives.
+  const readSelection = () => {
+    try {
+      let sel = null;
+      if (nativeDocGetSelection) sel = nativeApply(nativeDocGetSelection, document, []);
+      else if (nativeWinGetSelection) sel = nativeApply(nativeWinGetSelection, window, []);
+      else if (typeof window.getSelection === "function") sel = window.getSelection();
+      if (sel == null) return "";
+      const text = nativeSelectionToString ? nativeApply(nativeSelectionToString, sel, []) : sel;
+      return toPrimitiveString(text) || "";
+    } catch { return ""; }
+  };
 
   // A structured description of the payload, so policy reads as policy.
   function describe(text) {
@@ -174,7 +271,7 @@
     return {
       text: value,
       length: value.length,
-      lines: value.split("\n").length,
+      lines: countLines(value),
       execution: countMatches(value, EXECUTION_TOKENS),
       downloadExec: countMatches(value, DOWNLOAD_EXEC_TOKENS),
       stealth: countMatches(value, STEALTH_TOKENS),
@@ -196,14 +293,23 @@
     // manufacture a "user gesture" and turn its own block into a mere warning --
     // defeating one of the three block conditions in decide().
     if (!event.isTrusted) return;
-    lastClickAt = Date.now();
+    lastClickAt = nativeDateNow();
     lastClickLooksLikeCopy = false;
     try {
       const el = event.target?.closest?.("button,a,[role=button],[data-copy],[class*=copy],[id*=copy]");
       if (!el) return;
-      const label = `${el.getAttribute("aria-label") || ""} ${el.getAttribute("title") || ""} ` +
-        `${el.className || ""} ${el.id || ""} ${(el.textContent || "").slice(0, 80)}`;
-      lastClickLooksLikeCopy = COPY_HINT.test(label);
+      const attr = (name) => {
+        try {
+          const v = nativeGetAttribute
+            ? nativeApply(nativeGetAttribute, el, [name])
+            : el.getAttribute(name);
+          return toPrimitiveString(v) || "";
+        } catch { return ""; }
+      };
+      const label = `${attr("aria-label")} ${attr("title")} ` +
+        `${toPrimitiveString(el.className) || ""} ${toPrimitiveString(el.id) || ""} ` +
+        `${clipped(toPrimitiveString(el.textContent) || "", 80)}`;
+      lastClickLooksLikeCopy = countMatches(label, [COPY_HINT]) > 0;
     } catch { /* classification is best-effort */ }
   }, true);
 
@@ -213,12 +319,15 @@
   const browserSaysActivated = () => {
     try {
       const ua = navigator.userActivation;
-      return ua ? Boolean(ua.isActive) : null;
+      return ua ? ua.isActive === true : null;
     } catch { return null; }
   };
 
   const context = () => {
-    const recentTrustedClick = Date.now() - lastClickAt < 1500;
+    // nativeDateNow, not Date.now: replacing Date.now to return a constant makes
+    // every write look like it followed a click, and a forged gesture turns the
+    // command-shaped verdict from "block" into "warn", which forwards.
+    const recentTrustedClick = nativeDateNow() - lastClickAt < 1500;
     return {
       // `isTrusted` on the listener is what makes this sound: page script cannot
       // mint a trusted event, so the gesture cannot be forged. navigator
@@ -230,7 +339,7 @@
       userGesture: recentTrustedClick,
       browserActivation: browserSaysActivated(),
       fromCopyControl: recentTrustedClick && lastClickLooksLikeCopy,
-      host: location.hostname.toLowerCase()
+      host: lowered(toPrimitiveString(location.hostname) || "")
     };
   };
   // Worth being clear about the limit of the gesture rule: in the usual ClickFix
@@ -307,9 +416,10 @@
         `[Advanced Privacy Blocker] ClickFix guard: ${verdict} clipboard write ` +
         `(exec=${payload.execution} dl=${payload.downloadExec} ` +
         `stealth=${payload.stealth} lure=${payload.lure})`,
-        payload.text.slice(0, 200)
+        clipped(payload.text, 200)
       );
-      window.dispatchEvent(new CustomEvent("advanced-blocker-clipboard-guard", {
+      if (!NativeCustomEvent) return;
+      window.dispatchEvent(new NativeCustomEvent("advanced-blocker-clipboard-guard", {
         detail: {
           verdict,
           host: location.hostname,
@@ -319,7 +429,7 @@
             stealth: payload.stealth, lure: payload.lure
           },
           // Truncated: enough to identify the campaign, not a full payload store.
-          sample: payload.text.slice(0, 300)
+          sample: clipped(payload.text, 300)
         }
       }));
     } catch { /* reporting must never break the page */ }
@@ -347,13 +457,13 @@
     try {
       const bar = document.createElement("div");
       bar.setAttribute("role", "alert");
-      bar.style.cssText = [
+      bar.style.cssText = nativeApply(nativeArrayJoin, [
         "position:fixed", "inset:0 0 auto 0", "z-index:2147483647",
         "background:#7f1d1d", "color:#fff", "padding:14px 16px",
         "font:600 14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif",
         "box-shadow:0 2px 12px rgba(0,0,0,.45)", "display:flex",
         "gap:12px", "align-items:flex-start"
-      ].join(";");
+      ], [";"]);
 
       const msg = document.createElement("div");
       msg.style.cssText = "flex:1";
@@ -385,8 +495,14 @@
     try { verdict = decide(payload, context()); }
     catch { verdict = "warn"; } // a throwing policy must fail safe, not fail open
     if (verdict === "allow") return false;
-    report(verdict, payload);
-    showWarning(verdict);
+    // Reporting and the banner are side effects, not part of the verdict. Both
+    // touch page-replaceable machinery (CustomEvent, Array.prototype.join, the
+    // textContent setter, createElement), so either can be made to throw. An
+    // exception escaping here reached callers whose catch fell through to the
+    // native, which turned a block into a pass -- so the decision is finished
+    // before the side effects run, and they cannot undo it.
+    try { report(verdict, payload); } catch { /* verdict already decided */ }
+    try { showWarning(verdict); } catch { /* verdict already decided */ }
     return verdict === "block";
   }
 
@@ -406,9 +522,6 @@
   // risk -- unlike `window.open`, which libraries do wrap (see popup-guard.js).
   // Natives captured at document_start, before any page script runs, so later
   // tampering with these prototypes cannot change how the guard reads data.
-  const nativeIncludes = Array.prototype.includes;
-  const nativeArrayFrom = Array.from;
-
   // Give a snapshot its OWN non-writable @@iterator that walks indices.
   //
   // Handing a plain Array to the native is not enough. WebIDL's
@@ -569,7 +682,11 @@
 
             let hasText = false;
             try {
-              hasText = Boolean(types) && nativeApply(nativeIncludes, types, ["text/plain"]);
+              // Not Boolean(types): Boolean is a page-replaceable global, and
+              // Boolean = () => false made hasText false for every item, so the
+              // sequence was forwarded unclassified. Verified as a bypass.
+              hasText = types != null &&
+                nativeApply(nativeIncludes, types, ["text/plain"]) === true;
             } catch { return fail(); }
             if (!hasText) return skip();
 
@@ -634,9 +751,15 @@
         // through setData removes the differential entirely, and costs nothing:
         // intercept() returns immediately for text with no command tokens, which
         // is every ordinary copy.
-        try {
-          if (intercept(value)) return undefined; // drop: clipboard keeps its old contents
-        } catch { /* fall through to native */ }
+        // Fail CLOSED, for the same reason as execCommand's copy branch: the old
+        // `catch { fall through to native }` meant anything that threw while
+        // classifying forwarded the payload unchecked. intercept() is not
+        // supposed to throw -- its side effects are guarded -- so a throw here is
+        // an anomaly, and dropping the write costs at most one lost copy.
+        let blocked;
+        try { blocked = intercept(value); }
+        catch { return undefined; }
+        if (blocked) return undefined; // drop: clipboard keeps its old contents
         return nativeApply(native, this, [fmt, value]);
       });
     }
@@ -646,18 +769,58 @@
   //    the whole selection rather than calling setData.
   document.addEventListener("copy", (event) => {
     try {
-      const injected = event.clipboardData?.getData?.("text/plain");
+      const dt = nativeEventClipboardData
+        ? nativeApply(nativeEventClipboardData, event, [])
+        : event.clipboardData;
+      const injected = toPrimitiveString(
+        dt && nativeDTGetData ? nativeApply(nativeDTGetData, dt, ["text/plain"]) : dt?.getData?.("text/plain")
+      ) || "";
       if (!injected) return;
-      const selected = toPrimitiveString(window.getSelection?.() || "") || "";
+      const selected = readSelection();
       // Only inspect writes that do NOT match the selection: an unmodified copy
       // of what the user highlighted is their own action, whatever it says.
-      if (selected && injected.trim() === selected.trim()) return;
+      // Captured trim, so String.prototype.trim cannot be replaced to make any
+      // injected text compare equal to the selection and skip the check.
+      if (selected && trimmed(injected) === trimmed(selected)) return;
       if (intercept(injected)) {
         event.preventDefault();
         event.stopImmediatePropagation();
       }
     } catch { /* never interfere with a normal copy */ }
   }, true);
+
+  // What execCommand("copy") will actually copy. Read through captured getters:
+  // `active.value` finds a page-defined own property if there is one, so
+  //
+  //   Object.defineProperty(input, "value", { get: () => "harmless text" })
+  //
+  // had the classifier inspect text that is never written while the browser
+  // copied the real selection from internal slots. Verified as a bypass.
+  //
+  // A focused field's copy takes its SELECTION, and this classifies the whole
+  // value. That is deliberate: the value is a superset of the selection, so a
+  // partial selection can only ever be judged more strictly, never less.
+  const readCopySource = (doc) => {
+    const active = nativeActiveElement
+      ? nativeApply(nativeActiveElement, doc, [])
+      : doc.activeElement;
+    if (active != null) {
+      const getters = [nativeInputValue, nativeTextAreaValue];
+      for (let i = 0; i < getters.length; i += 1) {
+        if (!getters[i]) continue;
+        let value;
+        try { value = nativeApply(getters[i], active, []); }
+        catch { continue; } // not this element type
+        return toPrimitiveString(value);
+      }
+      // No captured value getter for this element type. Fall back to the own
+      // property, which is what a non-browser host (or a very old engine) gives
+      // us. This path is page-shadowable by construction; the captured getters
+      // above are the ones that matter in Chromium.
+      if ("value" in active) return toPrimitiveString(active.value);
+    }
+    return readSelection();
+  };
 
   // 4. document.execCommand("copy") against a page-controlled selection.
   //    Patched on Document.prototype for the same reason as the clipboard methods.
@@ -673,16 +836,25 @@
       // native reads "copy" and performs the copy unchecked.
       const cmd = toPrimitiveString(command);
       if (cmd === null) return false;
-      try {
-        if (cmd.toLowerCase() === "copy") {
-          const active = this.activeElement;
-          const raw = active && "value" in active
-            ? active.value
-            : window.getSelection?.() || "";
-          const asString = toPrimitiveString(raw);
-          if (asString === null || intercept(asString)) return false;
-        }
-      } catch { /* fall through to native */ }
+      // Captured toLowerCase. String.prototype.toLowerCase = () => "notcopy" made
+      // the guard skip classification while the native still performed the copy.
+      let isCopy;
+      try { isCopy = lowered(cmd) === "copy"; }
+      catch { isCopy = true; } // cannot tell: classify rather than wave through
+      if (isCopy) {
+        // Fail CLOSED from here. The previous `catch { fall through to native }`
+        // meant anything that threw while classifying -- a hostile activeElement
+        // getter, a replaced CustomEvent making report() throw -- forwarded the
+        // copy unchecked. For a copy command a throw is anomalous, not ordinary.
+        let source;
+        try { source = readCopySource(this); }
+        catch { return false; }
+        if (source === null) return false;
+        let blocked;
+        try { blocked = intercept(source); }
+        catch { return false; }
+        if (blocked) return false;
+      }
       // Build the argument list by index: a spread would use the array iterator,
       // which is page-replaceable.
       const args = [cmd];
